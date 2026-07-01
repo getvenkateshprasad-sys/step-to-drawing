@@ -36,32 +36,51 @@ No additional Python packages are needed beyond what FreeCAD ships with.
 
 ## Installation
 
-### Option A — Conda (recommended for scripting)
+### Option A — Conda on a specific drive (recommended, Windows)
 
-```bash
-conda create -n freecad python=3.11
-conda activate freecad
-conda install -c conda-forge freecad
+Install FreeCAD 1.1 into a conda env on D: (or any drive):
+
+```powershell
+conda create --prefix D:\conda-envs\freecad python=3.11 -y
+conda install --prefix D:\conda-envs\freecad -c conda-forge freecad -y
 ```
 
-### Option B — Windows installer
+FreeCAD will be at `D:\conda-envs\freecad\Library\bin\freecadcmd.exe`.
 
-1. Download FreeCAD 0.21 from https://www.freecad.org/downloads.php  
-2. Install to the default location  
-3. The command `freecadcmd` will be at `C:\Program Files\FreeCAD 0.21\bin\freecadcmd.exe`
+> **Important — Windows PATH quirk:** `freecadcmd` needs its own `Library\bin` folder on PATH  
+> to find its DLLs. Add this to every PowerShell session before running the script:
+>
+> ```powershell
+> $env:PATH = "D:\conda-envs\freecad\Library\bin;D:\conda-envs\freecad\Library\mingw-w64\bin;D:\conda-envs\freecad\Library\usr\bin;D:\conda-envs\freecad\Scripts;D:\conda-envs\freecad;" + $env:PATH
+> ```
+>
+> Or add these paths permanently via **System Properties → Environment Variables**.
+
+### Option B — Conda on C: (default)
+
+```powershell
+conda create -n freecad python=3.11 -y
+conda install -n freecad -c conda-forge freecad -y
+```
+
+FreeCAD will be at `C:\Users\<you>\anaconda3\envs\freecad\Library\bin\freecadcmd.exe`.  
+Same PATH fix applies.
 
 ### Option C — Linux AppImage
 
 ```bash
-chmod +x FreeCAD_0.21.AppImage
-# Run headless via:
-./FreeCAD_0.21.AppImage --appimage-extract-and-run freecadcmd step_to_drawing.py -- input.step
+chmod +x FreeCAD_1.1.AppImage
+./FreeCAD_1.1.AppImage --appimage-extract-and-run freecadcmd step_to_drawing.py -- input.step
 ```
 
 ### Verify your install
 
-```bash
-freecadcmd install.py
+```powershell
+# Set PATH first (D: install example)
+$env:PATH = "D:\conda-envs\freecad\Library\bin;D:\conda-envs\freecad\Library\mingw-w64\bin;D:\conda-envs\freecad\Library\usr\bin;D:\conda-envs\freecad\Scripts;D:\conda-envs\freecad;" + $env:PATH
+
+# Then run the checker
+& "D:\conda-envs\freecad\Library\bin\freecadcmd.exe" install.py
 ```
 
 Expected output:
@@ -78,21 +97,22 @@ All dependencies satisfied.
 
 ### Basic (output PDF next to input file)
 
-```bash
-freecadcmd step_to_drawing.py -- my_part.step
+```powershell
+# Windows — set PATH first, then:
+& "D:\conda-envs\freecad\Library\bin\freecadcmd.exe" step_to_drawing.py -- my_part.step
 # → my_part.pdf
 ```
 
 ### Specify output path
 
-```bash
-freecadcmd step_to_drawing.py -- my_part.step drawings/output.pdf
+```powershell
+& "D:\conda-envs\freecad\Library\bin\freecadcmd.exe" step_to_drawing.py -- my_part.step drawings/output.pdf
 ```
 
 ### Full options
 
 ```
-freecadcmd step_to_drawing.py -- <input.step> [output.pdf] [--angle {1|3}] [--sheet {A3|A2|A1}]
+freecadcmd.exe step_to_drawing.py -- <input.step> [output.pdf] [--angle {1|3}] [--sheet {A3|A2|A1}]
 
 positional arguments:
   input         Path to the .step or .stp file
