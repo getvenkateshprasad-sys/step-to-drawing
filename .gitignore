@@ -1,0 +1,6 @@
+*.pdf
+*.FCStd
+*.FCStd1
+__pycache__/
+*.pyc
+.DS_Store
