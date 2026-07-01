@@ -4,66 +4,97 @@ step_to_drawing.py
 Import a STEP file and export a multi-view 2D engineering drawing as PDF.
 
 Views generated:
-  - Front, Top, Right (first-angle or third-angle, configurable)
-  - One cross-section on the auto-detected symmetry plane
+  - Front, Top, Right orthographic projections
+  - One cross-section on the auto-detected plane of symmetry
   - Isometric view at half scale
 
-Requires FreeCAD 0.21+ with TechDraw workbench.
+IMPORTANT — must be run with the FreeCAD **GUI** binary (freecad.exe / FreeCAD),
+NOT freecadcmd.  PDF export in FreeCAD 1.1 requires the Gui module, which the
+console binary cannot load.  The script closes itself when finished.
 
-Usage:
-    freecadcmd step_to_drawing.py -- input.step [output.pdf] [--angle {1|3}] [--sheet {A3|A2|A1}]
+The easiest way to run it is the bundled launcher, which sets PATH and passes
+parameters correctly:
+
+    ./run.ps1 <input.step> [output.pdf] [-Sheet A3]
+
+Parameters are read from environment variables (set by run.ps1) so the FreeCAD
+GUI binary's own command-line parser does not intercept them:
+
+    S2D_INPUT   absolute path to the .step file    (required)
+    S2D_OUTPUT  absolute path to the output .pdf    (optional)
+    S2D_SHEET   A4 | A3 | A2 | A1 | A0             (default A3)
+
+    freecad.exe step_to_drawing.py
+
+Requires FreeCAD 1.0+ with the TechDraw workbench (bundled by default).
 """
 
 import sys
 import os
 import argparse
-import math
+from types import SimpleNamespace
 
 # ---------------------------------------------------------------------------
-# FreeCAD bootstrap (headless)
+# FreeCAD bootstrap
 # ---------------------------------------------------------------------------
 try:
     import FreeCAD
-    import FreeCADGui
     import Part
-    import TechDraw
-    import TechDrawGui
 except ImportError as exc:
     sys.exit(
         f"FreeCAD modules not found: {exc}\n"
-        "Run this script with 'freecadcmd' or activate the FreeCAD conda env."
+        "Run this script with the FreeCAD GUI binary (freecad.exe), not plain python."
     )
 
-FreeCAD.Console.PrintMessage = lambda *a: None   # suppress console noise
+
+# ---------------------------------------------------------------------------
+# Logging — GUI binary stdout is unreliable, so mirror progress to a .log file
+# ---------------------------------------------------------------------------
+_LOG_PATH = None
+
+def log(msg):
+    print(msg)
+    if _LOG_PATH:
+        try:
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(str(msg) + "\n")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-def parse_args():
-    # FreeCAD passes its own args before '--'; drop them.
+def get_params():
+    """
+    Parameters arrive via environment variables (set by run.ps1) because the
+    FreeCAD GUI binary parses any dashed command-line tokens itself and aborts
+    before the script runs.  Falls back to argv parsing when the script is run
+    directly (e.g. under freecadcmd for testing).
+    """
+    env_input = os.environ.get("S2D_INPUT")
+    if env_input:
+        sheet = os.environ.get("S2D_SHEET", "A3").upper()
+        if sheet not in SHEET_SIZES:
+            sheet = "A3"
+        return SimpleNamespace(
+            input=env_input,
+            output=os.environ.get("S2D_OUTPUT") or None,
+            sheet=sheet,
+        )
+
     raw = sys.argv[:]
     if "--" in raw:
         raw = raw[raw.index("--") + 1:]
-    elif len(raw) > 1 and not raw[1].startswith("-"):
-        raw = raw[1:]
+    else:
+        raw = [a for a in raw[1:] if not a.lower().endswith((".py", ".exe"))]
 
-    parser = argparse.ArgumentParser(
-        description="STEP → 2D Engineering Drawing PDF"
-    )
+    parser = argparse.ArgumentParser(description="STEP -> 2D Engineering Drawing PDF")
     parser.add_argument("input", help="Path to input .step / .stp file")
-    parser.add_argument(
-        "output", nargs="?", default=None,
-        help="Path for output PDF (default: same name as input)"
-    )
-    parser.add_argument(
-        "--angle", choices=["1", "3"], default="1",
-        help="Projection angle: 1 = first-angle (ISO), 3 = third-angle (ASME). Default: 1"
-    )
-    parser.add_argument(
-        "--sheet", choices=["A3", "A2", "A1"], default="A3",
-        help="Drawing sheet size. Default: A3"
-    )
+    parser.add_argument("output", nargs="?", default=None,
+                        help="Output PDF path (default: input name + .pdf)")
+    parser.add_argument("--sheet", choices=list(SHEET_SIZES),
+                        default="A3", help="Drawing sheet size. Default: A3")
     return parser.parse_args(raw)
 
 
@@ -73,17 +104,23 @@ def parse_args():
 def import_step(doc, path):
     if not os.path.isfile(path):
         sys.exit(f"Input file not found: {path}")
+
     Part.insert(path, doc.Name)
     doc.recompute()
 
-    shapes = [o for o in doc.Objects if hasattr(o, "Shape") and not o.Shape.isNull()]
+    shapes = [o for o in doc.Objects
+              if hasattr(o, "Shape") and o.Shape and not o.Shape.isNull()
+              and o.Shape.Solids]
     if not shapes:
-        sys.exit("No solid geometry found in the STEP file.")
+        # fall back to any non-null shape (surface models)
+        shapes = [o for o in doc.Objects
+                  if hasattr(o, "Shape") and o.Shape and not o.Shape.isNull()]
+    if not shapes:
+        sys.exit("No geometry found in the STEP file.")
 
     if len(shapes) == 1:
         return shapes[0]
 
-    # Fuse multiple bodies into one for view generation
     fused = doc.addObject("Part::MultiFuse", "FusedBody")
     fused.Shapes = shapes
     doc.recompute()
@@ -91,177 +128,160 @@ def import_step(doc, path):
 
 
 # ---------------------------------------------------------------------------
-# Symmetry plane detection
+# Symmetry-plane detection
+#
+# For each principal mid-plane, mirror the solid across it and measure the
+# volume of the intersection with the original.  ratio = common / original;
+# ratio == 1.0 means perfect mirror symmetry about that plane.
+# The plane with the highest ratio is chosen; ties are broken by picking the
+# normal along the SMALLEST extent so the cut face spans the two largest
+# dimensions (the most informative section).
 # ---------------------------------------------------------------------------
-# Strategy: test the three principal planes (XY, XZ, YZ) by comparing the
-# shape's bounding box extents.  The most symmetric plane is the one where
-# the centroid offset from the mid-plane is smallest relative to the extent.
-
 def detect_symmetry_plane(shape):
-    """
-    Returns ("XY" | "XZ" | "YZ", section_normal_vector, section_origin).
-    """
-    bb = shape.Shape.BoundBox
-    cx = (bb.XMin + bb.XMax) / 2
-    cy = (bb.YMin + bb.YMax) / 2
-    cz = (bb.ZMin + bb.ZMax) / 2
-
-    dx = bb.XMax - bb.XMin
-    dy = bb.YMax - bb.YMin
-    dz = bb.ZMax - bb.ZMin
-
-    # Sample cross-section areas at ±25 % of each axis to judge symmetry.
-    # A more symmetric plane yields more similar areas on both sides.
-    def cross_section_area(axis, position):
-        try:
-            if axis == "X":
-                plane = Part.makePlane(
-                    max(dy, dz) * 2, max(dy, dz) * 2,
-                    FreeCAD.Vector(position, cy - dy, cz - dz),
-                    FreeCAD.Vector(1, 0, 0)
-                )
-            elif axis == "Y":
-                plane = Part.makePlane(
-                    max(dx, dz) * 2, max(dx, dz) * 2,
-                    FreeCAD.Vector(cx - dx, position, cz - dz),
-                    FreeCAD.Vector(0, 1, 0)
-                )
-            else:
-                plane = Part.makePlane(
-                    max(dx, dy) * 2, max(dx, dy) * 2,
-                    FreeCAD.Vector(cx - dx, cy - dy, position),
-                    FreeCAD.Vector(0, 0, 1)
-                )
-            section = shape.Shape.section(plane)
-            return section.Area
-        except Exception:
-            return 0.0
+    """Return (plane_label, normal_vector, origin_vector)."""
+    solid = shape.Shape
+    bb = solid.BoundBox
+    center = FreeCAD.Vector(
+        (bb.XMin + bb.XMax) / 2.0,
+        (bb.YMin + bb.YMax) / 2.0,
+        (bb.ZMin + bb.ZMax) / 2.0,
+    )
+    extents = {"X": bb.XLength, "Y": bb.YLength, "Z": bb.ZLength}
+    normals = {
+        "X": FreeCAD.Vector(1, 0, 0),
+        "Y": FreeCAD.Vector(0, 1, 0),
+        "Z": FreeCAD.Vector(0, 0, 1),
+    }
+    total_vol = solid.Volume if solid.Volume > 1e-9 else 1e-9
 
     scores = {}
-    for axis, center, extent in [
-        ("X", cx, dx),
-        ("Y", cy, dy),
-        ("Z", cz, dz),
-    ]:
-        offset = extent * 0.25
-        a1 = cross_section_area(axis, center - offset)
-        a2 = cross_section_area(axis, center + offset)
-        # Score = similarity (lower diff = more symmetric)
-        scores[axis] = abs(a1 - a2) / (max(a1, a2) + 1e-9)
+    for axis, n in normals.items():
+        try:
+            mirrored = solid.mirror(center, n)
+            common = solid.common(mirrored)
+            scores[axis] = common.Volume / total_vol
+        except Exception as exc:
+            log(f"  symmetry probe {axis} failed ({exc}); scoring 0")
+            scores[axis] = 0.0
 
-    best_axis = min(scores, key=scores.get)
+    # Highest symmetry wins; tie-break by smallest extent (normal along short axis).
+    best_axis = max(scores, key=lambda a: (round(scores[a], 4), -extents[a]))
+    log(f"  symmetry ratios: " +
+        ", ".join(f"{a}={scores[a]:.3f}" for a in ("X", "Y", "Z")) +
+        f"  -> section normal along {best_axis}")
 
-    mapping = {
-        "X": ("YZ", FreeCAD.Vector(1, 0, 0), FreeCAD.Vector(cx, cy, cz)),
-        "Y": ("XZ", FreeCAD.Vector(0, 1, 0), FreeCAD.Vector(cx, cy, cz)),
-        "Z": ("XY", FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(cx, cy, cz)),
-    }
-    return mapping[best_axis]
+    label = {"X": "A", "Y": "B", "Z": "C"}[best_axis]
+    return label, normals[best_axis], center
 
 
 # ---------------------------------------------------------------------------
-# Sheet dimensions (mm)
+# Sheet sizes (mm, landscape) and blank template lookup
 # ---------------------------------------------------------------------------
 SHEET_SIZES = {
-    "A3": (420, 297),
-    "A2": (594, 420),
-    "A1": (841, 594),
+    "A4": (297, 210), "A3": (420, 297), "A2": (594, 420),
+    "A1": (841, 594), "A0": (1189, 841),
 }
+
+def template_path(sheet):
+    base = FreeCAD.getResourceDir() + "Mod/TechDraw/Templates/ISO/"
+    path = os.path.join(base, f"{sheet}_Landscape_blank.svg")
+    if not os.path.isfile(path):
+        sys.exit(f"TechDraw template not found: {path}\n"
+                 "Your FreeCAD install may be missing bundled templates.")
+    return path
 
 
 # ---------------------------------------------------------------------------
-# Drawing creation
+# Scale helpers
+# ---------------------------------------------------------------------------
+STD_SCALES = [0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100]
+
+def compute_scale(shape, max_w, max_h):
+    bb = shape.Shape.BoundBox
+    part_w = max(bb.XLength, 1e-6)
+    part_h = max(bb.ZLength, 1e-6)   # front view shows X (width) and Z (height)
+    raw = min(max_w / part_w, max_h / part_h)
+    fit = STD_SCALES[0]
+    for s in STD_SCALES:
+        if s <= raw:
+            fit = s
+    return fit
+
+def fmt_scale(s):
+    if s >= 1:
+        return f"{int(s)}:1" if float(s).is_integer() else f"{s:g}:1"
+    return f"1:{int(round(1 / s))}"
+
+
+# ---------------------------------------------------------------------------
+# Drawing assembly
 # ---------------------------------------------------------------------------
 def build_drawing(doc, shape, args):
     sheet_w, sheet_h = SHEET_SIZES[args.sheet]
-    template_name = f"A3_Landscape_ISO7200TD.svg"  # FreeCAD built-in template
-    templates_dir = FreeCAD.getResourceDir() + "Mod/TechDraw/Templates/"
-    template_path = os.path.join(templates_dir, template_name)
-    if not os.path.isfile(template_path):
-        template_path = ""   # FreeCAD will use a blank sheet
 
-    page = doc.addObject("TechDraw::DrawPage", "DrawingPage")
-    if template_path:
-        template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
-        template.Template = template_path
-        page.Template = template
+    page = doc.addObject("TechDraw::DrawPage", "Page")
+    template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
+    template.Template = template_path(args.sheet)
+    page.Template = template
+    doc.recompute()
 
-    # ------------------------------------------------------------------
-    # View layout constants (all in mm, origin = bottom-left of sheet)
-    # ------------------------------------------------------------------
-    margin = 15
-    title_h = 30       # reserve for title block at bottom
-    usable_w = sheet_w - 2 * margin
-    usable_h = sheet_h - 2 * margin - title_h
+    # ---- layout ------------------------------------------------------------
+    # TechDraw page coordinates: origin at BOTTOM-LEFT, +X right, +Y up,
+    # ranging 0..sheet_w by 0..sheet_h.  view.X / view.Y is the view centre.
+    # (Verified empirically against exported SVG transforms.)
+    title_h = 30.0                                   # title block band at bottom
+    usable_h = sheet_h - title_h
+    col_w = sheet_w / 3.0
+    row_h = usable_h / 2.0
+    col_x = {0: sheet_w / 6.0, 1: sheet_w / 2.0, 2: 5.0 * sheet_w / 6.0}
+    top_y = title_h + usable_h * 0.72                 # upper row centre
+    bot_y = title_h + usable_h * 0.28                 # lower row centre
 
-    # Divide usable area into a 3×2 grid:
-    #   [Front]  [Top]   [ISO (small)]
-    #   [Right]  [Section]  (empty)
-    col_w = usable_w / 3
-    row_h = usable_h / 2
+    def cell(col, row):
+        return col_x[int(col)], (top_y if row < 0.5 else bot_y)
 
-    def grid_center(col, row):
-        """col/row are 0-indexed from top-left."""
-        x = margin + col * col_w + col_w / 2
-        y = sheet_h - margin - title_h - row * row_h - row_h / 2
-        return x, y
+    scale = compute_scale(shape, col_w * 0.75, row_h * 0.75)
+    iso_scale = scale / 2.0
+    log(f"  main scale {fmt_scale(scale)}, iso scale {fmt_scale(iso_scale)}")
 
-    scale = compute_scale(shape, col_w * 0.8, row_h * 0.8)
-    iso_scale = scale / 2
+    V = FreeCAD.Vector
+    # Standard TechDraw viewing directions (normal points from part to viewer)
+    front = add_view(doc, page, shape, "Front", *cell(0, 0), scale,
+                     V(0, -1, 0), V(1, 0, 0))
+    top = add_view(doc, page, shape, "Top", *cell(1, 0), scale,
+                   V(0, 0, 1), V(1, 0, 0))
+    right = add_view(doc, page, shape, "Right", *cell(0, 1), scale,
+                     V(1, 0, 0), V(0, 1, 0))
+    iso = add_view(doc, page, shape, "Isometric", *cell(2, 0), iso_scale,
+                   V(1, -1, 1), V(1, 0, -1))
+    ix, iy = cell(2, 0)
+    add_annotation(doc, page, f"ISO  {fmt_scale(iso_scale)}", ix, iy - row_h * 0.42)
+    doc.recompute()
 
-    # ------------------------------------------------------------------
-    # Principal views
-    # ------------------------------------------------------------------
-    angle_flag = int(args.angle)
+    # ---- section on the detected symmetry plane -----------------------------
+    label, normal, origin = detect_symmetry_plane(shape)
+    sx, sy = cell(1, 1)
+    build_section(doc, page, shape, normal, origin, label, scale, sx, sy)
+    doc.recompute()
 
-    front = add_view(doc, page, shape, "Front",
-                     *grid_center(0, 0), scale,
-                     FreeCAD.Vector(0, 0, 1), FreeCAD.Vector(0, 1, 0))
-
-    top = add_view(doc, page, shape, "Top",
-                   *grid_center(1, 0), scale,
-                   FreeCAD.Vector(0, 1, 0), FreeCAD.Vector(0, 0, -1))
-
-    right = add_view(doc, page, shape, "Right",
-                     *grid_center(0, 1), scale,
-                     FreeCAD.Vector(1, 0, 0), FreeCAD.Vector(0, 1, 0))
-
-    # ------------------------------------------------------------------
-    # Section view
-    # ------------------------------------------------------------------
-    plane_name, normal, origin = detect_symmetry_plane(shape)
-    section = doc.addObject("TechDraw::DrawViewSection", "SectionView")
-    section.BaseView = front
-    section.Source = [shape]
-    section.ScaleType = "Custom"
-    section.Scale = scale
-    sx, sy = grid_center(1, 1)
-    section.X = sx
-    section.Y = sy
-    section.SectionNormal = normal
-    section.SectionOrigin = origin
-    section.SectionDirection = "Right"
-    page.addView(section)
-
-    # Section label
-    add_annotation(doc, page, f"SECTION {plane_name}-{plane_name}", sx, sy - row_h * 0.45)
-
-    # ------------------------------------------------------------------
-    # Isometric view
-    # ------------------------------------------------------------------
-    iso = add_view(doc, page, shape, "ISO",
-                   *grid_center(2, 0), iso_scale,
-                   FreeCAD.Vector(1, 1, 1).normalize(),
-                   FreeCAD.Vector(-1, 1, 0).normalize())
-    add_annotation(doc, page, f"ISOMETRIC  1:{int(1/iso_scale) if iso_scale < 1 else '1'}", *grid_center(2, 0.6))
-
-    # ------------------------------------------------------------------
-    # Dimensions
-    # ------------------------------------------------------------------
-    auto_dimension(doc, page, front, shape, scale)
-
+    # ---- dimensions ---------------------------------------------------------
+    # The view's 2D projected geometry only exists once the page's graphics
+    # scene has been built, so open the page in the GUI FIRST; otherwise the
+    # extent dimensions measure zero edges and render as "0".
+    open_page_scene(doc, page)
+    auto_dimension(doc, page, front, right, shape)
     doc.recompute()
     return page
+
+
+def open_page_scene(doc, page):
+    """Build the page's QGraphicsScene so projected 2D geometry is available."""
+    try:
+        import FreeCADGui as Gui
+        Gui.getDocument(doc.Name).getObject(page.Name).doubleClicked()
+        Gui.updateGui()
+    except Exception as exc:
+        log(f"  (could not open page scene: {exc})")
 
 
 def add_view(doc, page, shape, name, x, y, scale, direction, x_direction):
@@ -271,146 +291,209 @@ def add_view(doc, page, shape, name, x, y, scale, direction, x_direction):
     view.XDirection = x_direction
     view.ScaleType = "Custom"
     view.Scale = scale
+    page.addView(view)
+    # Position must be set AFTER the view is registered on the page, otherwise
+    # it is reset to (0,0) = page centre during the first recompute.
     view.X = x
     view.Y = y
-    page.addView(view)
+    log(f"  view {name:10s} -> ({x:.0f}, {y:.0f}) scale {scale}")
     return view
 
 
 def add_annotation(doc, page, text, x, y):
-    ann = doc.addObject("TechDraw::DrawViewAnnotation", f"Ann_{text[:8]}")
+    safe = "Ann_" + "".join(c for c in text if c.isalnum())[:12]
+    ann = doc.addObject("TechDraw::DrawViewAnnotation", safe)
     ann.Text = [text]
-    ann.X = x
-    ann.Y = y
-    ann.TextSize = 3.5
-    page.addView(ann)
-
-
-def compute_scale(shape, max_w, max_h):
-    """Pick a standard scale so the part fits within max_w × max_h mm."""
-    bb = shape.Shape.BoundBox
-    part_w = max(bb.XMax - bb.XMin, 1)
-    part_h = max(bb.YMax - bb.YMin, 1)
-    raw = min(max_w / part_w, max_h / part_h)
-
-    standards = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50]
-    for s in standards:
-        if s >= raw:
-            return s
-    return standards[-1]
-
-
-# ---------------------------------------------------------------------------
-# Auto-dimensioning (overall envelope + detected holes)
-# ---------------------------------------------------------------------------
-def auto_dimension(doc, page, view, shape, scale):
-    bb = shape.Shape.BoundBox
-
-    # Overall width (X)
-    _add_length_dim(doc, page, view,
-                    FreeCAD.Vector(bb.XMin, bb.YMin, 0),
-                    FreeCAD.Vector(bb.XMax, bb.YMin, 0),
-                    FreeCAD.Vector(0, -15, 0), "Width")
-
-    # Overall height (Y)
-    _add_length_dim(doc, page, view,
-                    FreeCAD.Vector(bb.XMin, bb.YMin, 0),
-                    FreeCAD.Vector(bb.XMin, bb.YMax, 0),
-                    FreeCAD.Vector(-15, 0, 0), "Height")
-
-    # Overall depth (Z)
-    _add_length_dim(doc, page, view,
-                    FreeCAD.Vector(bb.XMin, bb.YMin, bb.ZMin),
-                    FreeCAD.Vector(bb.XMin, bb.YMin, bb.ZMax),
-                    FreeCAD.Vector(-25, 0, 0), "Depth")
-
-    # Circular edges → diameter dimensions
-    seen_radii = set()
-    for edge in shape.Shape.Edges:
-        if _is_circle(edge):
-            r = edge.Curve.Radius
-            r_key = round(r, 2)
-            if r_key in seen_radii:
-                continue
-            seen_radii.add(r_key)
-            _add_radius_dim(doc, page, view, edge, r)
-
-
-def _is_circle(edge):
     try:
-        return edge.Curve.TypeId in (
-            "Part::GeomCircle", "Part::GeomEllipse"
-        ) or type(edge.Curve).__name__ == "Circle"
-    except Exception:
-        return False
-
-
-def _add_length_dim(doc, page, view, p1, p2, offset, tag):
-    try:
-        dim = doc.addObject("TechDraw::DrawViewDimension", f"Dim_{tag}")
-        dim.Type = "Distance"
-        dim.References2D = [(view, f"Edge{tag}")]   # symbolic; FreeCAD resolves
-        # Use 3D points directly when edge refs are unavailable
-        dim.SavedGeometry = [p1, p2]
-        dim.X = (p1.x + p2.x) / 2 + offset.x
-        dim.Y = (p1.y + p2.y) / 2 + offset.y
-        page.addView(dim)
-    except Exception:
-        pass   # dimensioning is best-effort; skip on API error
-
-
-def _add_radius_dim(doc, page, view, edge, radius):
-    try:
-        dim = doc.addObject("TechDraw::DrawViewDimension", f"DimR_{int(radius*100)}")
-        dim.Type = "Radius"
-        dim.SavedGeometry = [edge.Curve.Center]
-        dim.X = edge.Curve.Center.x
-        dim.Y = edge.Curve.Center.y + radius * 1.5
-        page.addView(dim)
+        ann.TextSize = 3.5
     except Exception:
         pass
+    page.addView(ann)
+    # Position after addView (see add_view note) or it snaps to page centre.
+    ann.X = x
+    ann.Y = y
+    return ann
 
 
-# ---------------------------------------------------------------------------
-# PDF export
-# ---------------------------------------------------------------------------
-def export_pdf(page, path):
+def build_section(doc, page, shape, normal, origin, label, scale, x, y):
+    """
+    Build a cross-section by cutting away the half-space on the +normal side of
+    the symmetry plane, then projecting the remaining solid ALONG the normal so
+    the cut face (with any internal features it passes through) is shown.
+
+    This is done with a plain DrawViewPart of the cut solid rather than a
+    TechDraw DrawViewSection: the latter is unreliable in headless mode
+    ("failed to create section CS") whereas a cut-solid view always renders.
+    The detected symmetry normal is always axis-aligned (X, Y or Z).
+    """
+    solid = shape.Shape
+    bb = solid.BoundBox
+    pad = 10.0
+    V = FreeCAD.Vector
+    if abs(normal.x) > 0.5:            # cut plane normal along X
+        cutbox = Part.makeBox(bb.XLength + 2 * pad, bb.YLength + 2 * pad,
+                              bb.ZLength + 2 * pad,
+                              V(origin.x, bb.YMin - pad, bb.ZMin - pad))
+        direction, xdir = V(1, 0, 0), V(0, 1, 0)
+    elif abs(normal.y) > 0.5:          # normal along Y
+        cutbox = Part.makeBox(bb.XLength + 2 * pad, bb.YLength + 2 * pad,
+                              bb.ZLength + 2 * pad,
+                              V(bb.XMin - pad, origin.y, bb.ZMin - pad))
+        direction, xdir = V(0, 1, 0), V(1, 0, 0)
+    else:                              # normal along Z
+        cutbox = Part.makeBox(bb.XLength + 2 * pad, bb.YLength + 2 * pad,
+                              bb.ZLength + 2 * pad,
+                              V(bb.XMin - pad, bb.YMin - pad, origin.z))
+        direction, xdir = V(0, 0, 1), V(1, 0, 0)
+
     try:
-        page.export(path)
-    except AttributeError:
-        # Older FreeCAD API
-        import importlib
-        exp = importlib.import_module("TechDrawGui")
-        exp.exportPageAsPdf(page, path)
-    print(f"PDF exported → {path}")
+        half = solid.cut(cutbox)
+        if half.Volume < 1e-6:
+            half = solid.common(cutbox)
+    except Exception as exc:
+        log(f"  section cut failed ({exc}); skipping section view")
+        return None
+
+    sobj = doc.addObject("Part::Feature", "SectionBody")
+    sobj.Shape = half
+    doc.recompute()
+
+    sview = add_view(doc, page, sobj, "SectionView", x, y, scale, direction, xdir)
+    add_annotation(doc, page, f"SECTION {label}-{label}", x, y - row_section_label_offset(scale, bb))
+    return sview
+
+
+def row_section_label_offset(scale, bb):
+    # place the label just below the section view
+    return max(bb.YLength, bb.ZLength) * scale * 0.5 + 12.0
+
+
+# ---------------------------------------------------------------------------
+# Auto-dimensioning via TechDraw.makeExtentDim
+#
+# makeExtentDim(view, [], direction) dimensions the whole view's envelope
+# (0 = horizontal, 1 = vertical).  This is the one dimensioning call that
+# renders reliably in headless mode; per-edge References3D dimensions do not
+# associate to a view and produce nothing.  The created dimension is then
+# nudged outside the view outline so it does not sit on top of the geometry.
+# ---------------------------------------------------------------------------
+def _extent_dim(doc, view, direction, tag, half_w, half_h):
+    import TechDraw
+    try:
+        dim = TechDraw.makeExtentDim(view, [], direction)
+        doc.recompute()
+        # dim.X / dim.Y are offsets RELATIVE TO THE VIEW CENTRE (not the page).
+        gap = 15.0
+        if direction == 0:                 # horizontal extent -> below the view
+            dim.X, dim.Y = 0.0, -(half_h + gap)
+        else:                              # vertical extent -> left of the view
+            dim.X, dim.Y = -(half_w + gap), 0.0
+        return dim
+    except Exception as exc:
+        log(f"  extent dim {tag} skipped ({exc})")
+        return None
+
+
+def auto_dimension(doc, page, front, right, shape):
+    bb = shape.Shape.BoundBox
+    fs = float(front.Scale)
+    rs = float(right.Scale)
+
+    # On-paper half sizes of each view (front shows X x Z; right shows Y x Z).
+    f_hw, f_hh = bb.XLength * fs / 2.0, bb.ZLength * fs / 2.0
+    r_hw, r_hh = bb.YLength * rs / 2.0, bb.ZLength * rs / 2.0
+
+    # Front view: overall width (horizontal) + overall height (vertical).
+    _extent_dim(doc, front, 0, "Width", f_hw, f_hh)
+    _extent_dim(doc, front, 1, "Height", f_hw, f_hh)
+    # Right view: overall depth (its horizontal extent = Y).
+    _extent_dim(doc, right, 0, "Depth", r_hw, r_hh)
+    doc.recompute()
+
+
+# ---------------------------------------------------------------------------
+# PDF export (requires the GUI module -> run under freecad.exe)
+# ---------------------------------------------------------------------------
+def export_pdf(doc, page, path):
+    try:
+        import FreeCADGui as Gui
+        import TechDrawGui
+    except ImportError:
+        sys.exit(
+            "PDF export needs the FreeCAD Gui module.\n"
+            "Run this script with the GUI binary 'freecad.exe', not 'freecadcmd'."
+        )
+    # CRITICAL: exportPageAsPdf renders the page's graphics scene, which is only
+    # built when the page is opened in the GUI.  Without this the PDF contains
+    # the template and labels but NONE of the projected view geometry.
+    try:
+        gdoc = Gui.getDocument(doc.Name)
+        gpage = gdoc.getObject(page.Name)
+        gpage.doubleClicked()      # opens the page -> builds the QGraphicsScene
+        Gui.updateGui()
+    except Exception as exc:
+        log(f"  (warning: could not open page in GUI: {exc})")
+    TechDrawGui.exportPageAsPdf(page, path)
+    if os.environ.get("S2D_DEBUG_SVG"):
+        try:
+            TechDrawGui.exportPageAsSvg(page, os.path.splitext(path)[0] + ".svg")
+        except Exception as exc:
+            log(f"  (svg debug export failed: {exc})")
+    if not os.path.isfile(path):
+        sys.exit("PDF export reported success but no file was written.")
+    log(f"PDF exported -> {path}  ({os.path.getsize(path)} bytes)")
+
+
+def hard_exit(code=0):
+    """
+    Terminate immediately.  Under the GUI binary in offscreen mode the Qt event
+    loop keeps the process alive after the script finishes; closing the main
+    window does not reliably stop it.  A hard exit is the robust way to end a
+    one-shot batch run.  The document is already saved/closed and the log file
+    is flushed on every write, so nothing is lost.
+    """
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    os._exit(code)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
-    args = parse_args()
+    global _LOG_PATH
+    args = get_params()
 
     step_path = os.path.abspath(args.input)
-    if args.output:
-        pdf_path = os.path.abspath(args.output)
-    else:
-        pdf_path = os.path.splitext(step_path)[0] + ".pdf"
+    pdf_path = (os.path.abspath(args.output) if args.output
+                else os.path.splitext(step_path)[0] + ".pdf")
+    _LOG_PATH = os.path.splitext(pdf_path)[0] + ".log"
+    open(_LOG_PATH, "w", encoding="utf-8").close()
 
+    log(f"Importing {step_path}")
     doc = FreeCAD.newDocument("StepDrawing")
-
-    print(f"Importing {step_path} …")
     shape = import_step(doc, step_path)
 
-    print("Building drawing …")
+    log("Building drawing")
     page = build_drawing(doc, shape, args)
 
-    print(f"Exporting PDF → {pdf_path} …")
-    export_pdf(page, pdf_path)
+    log("Exporting PDF")
+    export_pdf(doc, page, pdf_path)
 
     FreeCAD.closeDocument(doc.Name)
-    print("Done.")
+    log("Done.")
+    hard_exit(0)
 
 
-if __name__ == "__main__":
+# NOTE: FreeCAD's binaries execute a passed script with __name__ set to the
+# module name, NOT "__main__", so a normal `if __name__ == "__main__"` guard
+# would never fire.  Run unconditionally (this file is only ever an entry point).
+try:
     main()
+except SystemExit:
+    raise
+except BaseException as exc:
+    log(f"FATAL: {exc!r}")
+    hard_exit(1)

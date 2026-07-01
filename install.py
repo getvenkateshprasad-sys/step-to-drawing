@@ -35,5 +35,6 @@ def check():
     print("\nAll dependencies satisfied. You are ready to use step_to_drawing.py.")
 
 
-if __name__ == "__main__":
-    check()
+# FreeCAD runs a passed script with __name__ set to the module name (not
+# "__main__"), so call unconditionally.
+check()

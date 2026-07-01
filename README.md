@@ -1,89 +1,70 @@
 # step-to-drawing
 
-Automatically convert a STEP file into a fully dimensioned 2D engineering drawing PDF.
+Automatically convert a STEP file into a multi-view 2D engineering drawing PDF using FreeCAD.
+
+Given any `.step` / `.stp` file it produces a single PDF containing:
+
+| Element | Description |
+|---|---|
+| **Front / Top / Right** | The three principal orthographic views |
+| **Isometric** | A reduced-scale (half) 3D view for reference |
+| **Section A–A** | A cross-section on the **auto-detected plane of symmetry**, revealing internal features |
+| **Dimensions** | Overall envelope — width, height and depth |
+| **Title block** | From the standard ISO template (part number, scale, etc. can be filled in) |
+
+Everything runs headless from one command; a FreeCAD window flashes briefly and closes itself.
 
 ---
 
-## What it produces
+## Example output
 
-Given any `.step` or `.stp` file the tool outputs a single PDF containing:
-
-| View | Description |
-|---|---|
-| **Front** | Standard front orthographic projection |
-| **Top** | Top orthographic projection |
-| **Right** | Right-side orthographic projection |
-| **Section** | Cross-section on the auto-detected plane of symmetry |
-| **Isometric** | Small-scale ISO view for spatial reference |
-
-Dimensions are added automatically:
-- Overall width, height, and depth (bounding-box envelope)
-- Diameter / radius for every unique circular feature (holes, bosses, fillets)
+Running it on a bracket produces Front (120 × 55), Top (with all holes), Right (80 deep),
+an isometric view, and a Section A–A revealing the bore — each auto-scaled and laid out on an
+A3 sheet. A rotational flange produces the same layout with the section cutting through the
+central bore and hub.
 
 ---
 
 ## Requirements
 
-| Requirement | Version |
+| Requirement | Version / Notes |
 |---|---|
-| FreeCAD | 0.21 or later |
-| Python | 3.10+ (bundled with FreeCAD) |
-| OS | Windows 10/11, Ubuntu 20.04+, macOS 12+ |
+| FreeCAD | **1.0 or later** (tested on 1.1.0). Must be the GUI build — see below. |
+| OS | Windows 10/11 (the `run.ps1` launcher is PowerShell). Linux/macOS supported via the manual command. |
 
-No additional Python packages are needed beyond what FreeCAD ships with.
+### Why the GUI binary (not `freecadcmd`)
+
+FreeCAD 1.1's PDF export (`TechDrawGui.exportPageAsPdf`) needs the **Gui module**, which the
+console binary `freecadcmd` cannot load (`Cannot load Gui module in console application`).
+So the tool runs under **`freecad.exe`**. It does *not* open an interactive session — it runs
+the script and exits. Qt's `offscreen` platform (which would hide the window) unfortunately
+**deadlocks** this build during TechDraw export, so a window appears for a few seconds and then
+closes on its own.
 
 ---
 
 ## Installation
 
-### Option A — Conda on a specific drive (recommended, Windows)
-
-Install FreeCAD 1.1 into a conda env on D: (or any drive):
+Install FreeCAD into a conda environment (any drive):
 
 ```powershell
 conda create --prefix D:\conda-envs\freecad python=3.11 -y
 conda install --prefix D:\conda-envs\freecad -c conda-forge freecad -y
 ```
 
-FreeCAD will be at `D:\conda-envs\freecad\Library\bin\freecadcmd.exe`.
+This puts the GUI binary at `D:\conda-envs\freecad\Library\bin\freecad.exe`.
 
-> **Important — Windows PATH quirk:** `freecadcmd` needs its own `Library\bin` folder on PATH  
-> to find its DLLs. Add this to every PowerShell session before running the script:
->
-> ```powershell
-> $env:PATH = "D:\conda-envs\freecad\Library\bin;D:\conda-envs\freecad\Library\mingw-w64\bin;D:\conda-envs\freecad\Library\usr\bin;D:\conda-envs\freecad\Scripts;D:\conda-envs\freecad;" + $env:PATH
-> ```
->
-> Or add these paths permanently via **System Properties → Environment Variables**.
+If you install FreeCAD somewhere else, either edit `$DefaultFreeCadHome` at the top of
+`run.ps1`, or set the environment variable `FREECAD_HOME` to the environment root (the folder
+that contains `Library\bin\freecad.exe`).
 
-### Option B — Conda on C: (default)
+### Verify the install
 
 ```powershell
-conda create -n freecad python=3.11 -y
-conda install -n freecad -c conda-forge freecad -y
-```
-
-FreeCAD will be at `C:\Users\<you>\anaconda3\envs\freecad\Library\bin\freecadcmd.exe`.  
-Same PATH fix applies.
-
-### Option C — Linux AppImage
-
-```bash
-chmod +x FreeCAD_1.1.AppImage
-./FreeCAD_1.1.AppImage --appimage-extract-and-run freecadcmd step_to_drawing.py -- input.step
-```
-
-### Verify your install
-
-```powershell
-# Set PATH first (D: install example)
-$env:PATH = "D:\conda-envs\freecad\Library\bin;D:\conda-envs\freecad\Library\mingw-w64\bin;D:\conda-envs\freecad\Library\usr\bin;D:\conda-envs\freecad\Scripts;D:\conda-envs\freecad;" + $env:PATH
-
-# Then run the checker
 & "D:\conda-envs\freecad\Library\bin\freecadcmd.exe" install.py
 ```
 
-Expected output:
+Expected:
 ```
   [OK]  FreeCAD
   [OK]  Part
@@ -95,122 +76,112 @@ All dependencies satisfied.
 
 ## Usage
 
-### Basic (output PDF next to input file)
+### Recommended — the launcher
 
 ```powershell
-# Windows — set PATH first, then:
-& "D:\conda-envs\freecad\Library\bin\freecadcmd.exe" step_to_drawing.py -- my_part.step
-# → my_part.pdf
+# output PDF is written next to the input file
+.\run.ps1 my_part.step
+
+# explicit output path and sheet size
+.\run.ps1 my_part.step drawings\my_part.pdf -Sheet A2
 ```
 
-### Specify output path
+`-Sheet` accepts `A4`, `A3` (default), `A2`, `A1`, `A0`.
 
-```powershell
-& "D:\conda-envs\freecad\Library\bin\freecadcmd.exe" step_to_drawing.py -- my_part.step drawings/output.pdf
-```
+The launcher sets up PATH, passes parameters via environment variables, runs `freecad.exe`,
+and reports the resulting PDF (or prints the log if something went wrong).
 
-### Full options
+### Manual (any OS)
 
-```
-freecadcmd.exe step_to_drawing.py -- <input.step> [output.pdf] [--angle {1|3}] [--sheet {A3|A2|A1}]
-
-positional arguments:
-  input         Path to the .step or .stp file
-  output        Output PDF path (optional, defaults to input filename + .pdf)
-
-options:
-  --angle {1,3}          Projection standard: 1 = first-angle / ISO (default)
-                                               3 = third-angle / ASME
-  --sheet {A3,A2,A1}     Sheet size (default: A3)
-```
-
-### Examples
+The FreeCAD GUI binary intercepts dashed command-line flags, so parameters are passed as
+environment variables rather than arguments:
 
 ```bash
-# First-angle projection, A3 sheet (ISO default)
-freecadcmd step_to_drawing.py -- bracket.step
-
-# Third-angle projection (ASME), A2 sheet
-freecadcmd step_to_drawing.py -- bracket.step bracket_drawing.pdf --angle 3 --sheet A2
-
-# Large part on A1
-freecadcmd step_to_drawing.py -- housing.step housing_drawing.pdf --sheet A1
+export S2D_INPUT=/abs/path/my_part.step
+export S2D_OUTPUT=/abs/path/my_part.pdf   # optional
+export S2D_SHEET=A3                        # optional
+freecad step_to_drawing.py
 ```
+
+On success the PDF is written and a matching `.log` file records progress.
 
 ---
 
-## How symmetry detection works
+## How it works
 
-The script tests all three principal planes (XY, XZ, YZ) by sampling cross-section areas at ±25 % offsets on each axis. The plane where the two sampled areas are most similar is chosen as the section plane. For parts with no dominant symmetry the YZ plane (cutting along depth) is used as the fallback.
+```
+STEP file
+  → FreeCAD imports it (Part workbench); multiple solids are fused
+  → Symmetry plane: mirror the solid about each principal mid-plane and measure
+      the volume of the intersection with the original; the plane with the
+      highest overlap ratio is chosen as the cut plane
+  → TechDraw page (ISO template, chosen sheet size)
+      · Front / Top / Right / Isometric views, auto-scaled to fit the grid
+      · Section = the solid with the +normal half removed, projected ALONG the
+        normal so the cut face and internal features are visible
+  → The page is opened so its 2D geometry materialises, then overall
+      width / height / depth dimensions are added (TechDraw.makeExtentDim)
+  → Exported to PDF, then the process exits
+```
 
-This heuristic works well for:
-- Prismatic parts (brackets, plates, blocks)
-- Rotational parts (shafts, flanges, hubs)
-- Housings with one dominant symmetry plane
+### Symmetry detection
 
-It may not pick the ideal plane for highly complex organic shapes — in that case use a CAD tool to manually set the section after generation.
+Works well for prismatic parts (brackets, plates, blocks) and rotational parts
+(shafts, flanges, hubs). For a rotational part multiple planes tie at ratio 1.0, and the tie
+is broken toward the axis that gives the most informative section. Highly asymmetric or organic
+shapes fall back to the best-scoring plane, which may not be the ideal engineering section.
+
+### Scale
+
+The nearest standard scale is chosen so the part fills ~75 % of a view cell:
+
+```
+1:50 … 1:5, 1:4, 1:2, 1:1, 2:1, 5:1 … 100:1
+```
+
+The isometric view is drawn at half the main scale.
 
 ---
 
-## Scale selection
+## Current limitations
 
-The script picks the nearest standard scale from the series:
+- **Dimensions cover the overall envelope only** (width, height, depth). Individual hole
+  diameters, hole positions, radii and GD&T are **not** auto-added — in headless FreeCAD only
+  the whole-view extent dimension renders reliably. Add feature dimensions manually in the
+  FreeCAD GUI (open the generated logic in TechDraw) if needed.
+- **Section hatching** is not applied (the cut face is shown without ISO hatching).
+- Surface-finish symbols, tolerances, datums and title-block text must be added manually.
+- Very large assemblies (many solids) are fused before drawing and may be slow.
 
-```
-1:20, 1:10, 1:5, 1:4, 1:2, 1:1, 2:1, 5:1, 10:1, 20:1, 50:1
-```
-
-so the part fills roughly 80 % of each view cell. The isometric view is always half the main scale.
-
----
-
-## Output layout (A3 example)
-
-```
-┌─────────────────────────────────────────────────┐
-│  Front view   │  Top view     │  ISO (half scale)│
-│               │               │                  │
-├───────────────┼───────────────┤                  │
-│  Right view   │ Section view  │                  │
-│               │  (auto-plane) │                  │
-├───────────────┴───────────────┴──────────────────┤
-│  Title block                                      │
-└──────────────────────────────────────────────────┘
-```
+These are honest boundaries of what can be produced fully automatically; the geometry, views,
+section and envelope dimensions are correct and to scale.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `FreeCAD modules not found` | Wrong Python interpreter | Use `freecadcmd`, not `python` |
-| `No solid geometry found` | STEP file is surface-only or empty | Check the STEP file in a viewer; ensure it contains solids |
-| PDF is blank / views missing | FreeCAD TechDraw recompute timeout | Re-run; large assemblies may need more time |
-| Section view shows wrong plane | Low-symmetry part | Acceptable; or manually edit the script's `detect_symmetry_plane()` return value |
-| Dimensions overlap | Very dense feature set | Reduce via `auto_dimension()` seen_radii threshold in the script |
+| Symptom | Cause / Fix |
+|---|---|
+| `freecad.exe not found under ...` | Set `FREECAD_HOME` or edit `$DefaultFreeCadHome` in `run.ps1`. |
+| Runs but no PDF, empty `.log` | freecad.exe couldn't start its Python — ensure the whole env is reachable (the launcher adds the conda env root + `Library\bin` to PATH automatically). |
+| PDF has views but value shows `0` | The page scene wasn't built before dimensioning — this is handled by the script; if you modified it, keep `open_page_scene()` before `auto_dimension()`. |
+| Window stays open / hangs | Don't set `QT_QPA_PLATFORM=offscreen` (it deadlocks); the script hard-exits after export. |
+| `No solid geometry found` | The STEP is surface-only or empty — check it in a viewer. |
 
 ---
 
-## File structure
+## Files
 
 ```
 step-to-drawing/
-├── step_to_drawing.py   # Main script
-├── install.py           # Dependency checker
-└── README.md            # This file
+├── step_to_drawing.py   # main script (run under freecad.exe)
+├── run.ps1              # Windows launcher — sets up env and runs it
+├── install.py           # dependency checker (run under freecadcmd)
+└── README.md
 ```
-
----
-
-## Limitations
-
-- Auto-dimensioning covers the bounding envelope and circular features only. GD&T callouts, surface finish symbols, and datum references must be added manually.
-- FreeCAD's TechDraw API does not expose full ASME Y14.5 / ISO 1101 GD&T symbols through the headless API; this is a FreeCAD limitation, not the script's.
-- Assembly STEP files with many components may be slow; the script fuses all bodies before view creation.
 
 ---
 
 ## License
 
-MIT — use freely, attribution appreciated.
+MIT.
