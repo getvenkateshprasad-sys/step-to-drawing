@@ -21,7 +21,11 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)] [string] $StepFile,
     [Parameter(Position = 1)] [string] $Output = "",
-    [ValidateSet("A4","A3","A2","A1","A0")] [string] $Sheet = "A3"
+    [ValidateSet("A4","A3","A2","A1","A0")] [string] $Sheet = "A3",
+    [string] $PartName  = "",   # title block: part title (default: file name)
+    [string] $Material  = "",   # title block: material spec
+    [string] $Author    = "",   # title block: designed-by
+    [string] $DrawingNo = ""    # title block: drawing number (default: file name)
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,9 +68,13 @@ $InputFull = (Resolve-Path $StepFile).Path
 
 # Pass parameters via environment variables, NOT command-line flags: the
 # FreeCAD GUI binary parses dashed tokens itself and would abort on "--sheet".
-$env:S2D_INPUT  = $InputFull
-$env:S2D_OUTPUT = if ($Output -ne "") { [System.IO.Path]::GetFullPath($Output) } else { "" }
-$env:S2D_SHEET  = $Sheet
+$env:S2D_INPUT      = $InputFull
+$env:S2D_OUTPUT     = if ($Output -ne "") { [System.IO.Path]::GetFullPath($Output) } else { "" }
+$env:S2D_SHEET      = $Sheet
+$env:S2D_TITLE      = $PartName
+$env:S2D_MATERIAL   = $Material
+$env:S2D_AUTHOR     = $Author
+$env:S2D_DRAWING_NO = $DrawingNo
 
 Write-Host "FreeCAD : $FreeCadExe"
 Write-Host "Script  : $Script  (exists=$(Test-Path $Script))"

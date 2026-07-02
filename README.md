@@ -9,8 +9,10 @@ Given any `.step` / `.stp` file it produces a single PDF containing:
 | **Front / Top / Right** | The three principal orthographic views |
 | **Isometric** | A reduced-scale (half) 3D view for reference |
 | **Section A–A** | A cross-section on the **auto-detected plane of symmetry**, revealing internal features |
-| **Dimensions** | Overall envelope — width, height and depth |
-| **Title block** | From the standard ISO template (part number, scale, etc. can be filled in) |
+| **Envelope dimensions** | Overall width, height and depth |
+| **Diameter dimensions** | One ⌀ callout per unique circular feature, leader on the actual hole |
+| **Hole table** | Every Z-axis hole with tag, ⌀, X/Y position from the datum corner, and depth (`THRU` when through-going) — bosses/hubs are automatically excluded |
+| **Populated title block** | Part name, material, author, drawing number, date, scale, sheet — filled from command-line parameters |
 
 Everything runs headless from one command; a FreeCAD window flashes briefly and closes itself.
 
@@ -84,9 +86,19 @@ All dependencies satisfied.
 
 # explicit output path and sheet size
 .\run.ps1 my_part.step drawings\my_part.pdf -Sheet A2
+
+# with title-block metadata
+.\run.ps1 my_part.step -PartName "Mounting Bracket" -Material "AlMg3 (5754)" `
+          -Author "V. Prasad" -DrawingNo "TRF-0001"
 ```
 
-`-Sheet` accepts `A4`, `A3` (default), `A2`, `A1`, `A0`.
+| Parameter | Meaning | Default |
+|---|---|---|
+| `-Sheet` | `A4` / `A3` / `A2` / `A1` / `A0` | `A3` |
+| `-PartName` | Title-block part title | input file name |
+| `-Material` | Material spec (shown under the title) | blank |
+| `-Author` | "Designed by" field | blank |
+| `-DrawingNo` | Drawing number field | input file name |
 
 The launcher sets up PATH, passes parameters via environment variables, runs `freecad.exe`,
 and reports the resulting PDF (or prints the log if something went wrong).
@@ -98,8 +110,12 @@ environment variables rather than arguments:
 
 ```bash
 export S2D_INPUT=/abs/path/my_part.step
-export S2D_OUTPUT=/abs/path/my_part.pdf   # optional
-export S2D_SHEET=A3                        # optional
+export S2D_OUTPUT=/abs/path/my_part.pdf    # optional
+export S2D_SHEET=A3                         # optional
+export S2D_TITLE="Mounting Bracket"         # optional
+export S2D_MATERIAL="AlMg3 (5754)"          # optional
+export S2D_AUTHOR="V. Prasad"               # optional
+export S2D_DRAWING_NO="TRF-0001"            # optional
 freecad step_to_drawing.py
 ```
 
@@ -145,16 +161,19 @@ The isometric view is drawn at half the main scale.
 
 ## Current limitations
 
-- **Dimensions cover the overall envelope only** (width, height, depth). Individual hole
-  diameters, hole positions, radii and GD&T are **not** auto-added — in headless FreeCAD only
-  the whole-view extent dimension renders reliably. Add feature dimensions manually in the
-  FreeCAD GUI (open the generated logic in TechDraw) if needed.
+- **Hole table covers Z-axis (top-view) holes only.** Side-drilled holes appear in the views
+  and get diameter callouts where they project as circles, but are not listed in the table.
+- **Diameter callouts are per unique size** (one ⌀ per distinct diameter, capped at 8);
+  counts and positions for repeated holes live in the hole table.
+- **No GD&T, tolerances, surface-finish symbols or datums** — tolerance intent is not
+  derivable from bare geometry, and FreeCAD's headless API doesn't expose these symbols.
 - **Section hatching** is not applied (the cut face is shown without ISO hatching).
-- Surface-finish symbols, tolerances, datums and title-block text must be added manually.
+- **Hole depth is the cylindrical-face extent**; counterbores/countersinks appear as separate
+  table rows rather than a combined callout.
 - Very large assemblies (many solids) are fused before drawing and may be slow.
 
-These are honest boundaries of what can be produced fully automatically; the geometry, views,
-section and envelope dimensions are correct and to scale.
+The geometry, views, section, envelope dimensions, diameter callouts, hole table and title
+block are correct, to scale, and produced fully automatically.
 
 ---
 

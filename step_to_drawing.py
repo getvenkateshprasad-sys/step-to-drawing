@@ -81,6 +81,10 @@ def get_params():
             input=env_input,
             output=os.environ.get("S2D_OUTPUT") or None,
             sheet=sheet,
+            title=os.environ.get("S2D_TITLE") or None,
+            material=os.environ.get("S2D_MATERIAL") or None,
+            author=os.environ.get("S2D_AUTHOR") or None,
+            drawing_no=os.environ.get("S2D_DRAWING_NO") or None,
         )
 
     raw = sys.argv[:]
@@ -95,6 +99,10 @@ def get_params():
                         help="Output PDF path (default: input name + .pdf)")
     parser.add_argument("--sheet", choices=list(SHEET_SIZES),
                         default="A3", help="Drawing sheet size. Default: A3")
+    parser.add_argument("--title", default=None)
+    parser.add_argument("--material", default=None)
+    parser.add_argument("--author", default=None)
+    parser.add_argument("--drawing-no", dest="drawing_no", default=None)
     return parser.parse_args(raw)
 
 
@@ -183,12 +191,61 @@ SHEET_SIZES = {
 }
 
 def template_path(sheet):
+    """Prefer a template with a title block; fall back to the blank sheet."""
     base = FreeCAD.getResourceDir() + "Mod/TechDraw/Templates/ISO/"
-    path = os.path.join(base, f"{sheet}_Landscape_blank.svg")
-    if not os.path.isfile(path):
-        sys.exit(f"TechDraw template not found: {path}\n"
-                 "Your FreeCAD install may be missing bundled templates.")
-    return path
+    for name in (f"{sheet}_Landscape_TD.svg",
+                 f"{sheet}_Landscape_ISO5457_advanced.svg",
+                 f"{sheet}_Landscape_blank.svg"):
+        path = os.path.join(base, name)
+        if os.path.isfile(path):
+            return path
+    sys.exit(f"No TechDraw template found for {sheet} under {base}\n"
+             "Your FreeCAD install may be missing bundled templates.")
+
+
+def fill_title_block(template, args, scale):
+    """
+    Populate the template's editable text fields.  Field names differ between
+    templates, so match by keyword rather than exact key.
+    """
+    import datetime
+    title = args.title or os.path.splitext(os.path.basename(args.input))[0]
+    number = args.drawing_no or title
+    today = datetime.date.today().isoformat()
+    try:
+        texts = dict(template.EditableTexts)
+    except Exception:
+        return
+    filled = []
+    for key in texts:
+        k = key.lower()
+        val = None
+        if "subtitle" in k:
+            val = f"Material: {args.material}" if args.material else ""
+        elif "title" in k:
+            val = title
+        elif "material" in k:
+            val = args.material or ""
+        elif any(s in k for s in ("author", "creator", "designed")):
+            val = args.author or ""
+        elif "drawing_number" in k or k == "number":
+            val = number
+        elif "scale" in k:
+            val = fmt_scale(scale)
+        elif "creation" in k or "date_of_issue" in k:
+            val = today
+        elif "sheet" in k:
+            val = "1 / 1"
+        if val is not None:
+            texts[key] = val
+            if val:
+                filled.append(key)
+    try:
+        template.EditableTexts = texts
+        if filled:
+            log(f"  title block: {', '.join(filled)}")
+    except Exception as exc:
+        log(f"  (title block fill failed: {exc})")
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +300,7 @@ def build_drawing(doc, shape, args):
     scale = compute_scale(shape, col_w * 0.75, row_h * 0.75)
     iso_scale = scale / 2.0
     log(f"  main scale {fmt_scale(scale)}, iso scale {fmt_scale(iso_scale)}")
+    fill_title_block(template, args, scale)
 
     V = FreeCAD.Vector
     # Standard TechDraw viewing directions (normal points from part to viewer)
@@ -270,6 +328,13 @@ def build_drawing(doc, shape, args):
     # extent dimensions measure zero edges and render as "0".
     open_page_scene(doc, page)
     auto_dimension(doc, page, front, right, shape)
+    add_diameter_dims(doc, page, [top, front, right])
+
+    # ---- hole table ----------------------------------------------------------
+    holes = detect_holes(shape)
+    if holes:
+        add_hole_table(doc, page, shape, holes, *cell(2, 1))
+
     doc.recompute()
     return page
 
@@ -359,13 +424,13 @@ def build_section(doc, page, shape, normal, origin, label, scale, x, y):
     doc.recompute()
 
     sview = add_view(doc, page, sobj, "SectionView", x, y, scale, direction, xdir)
-    add_annotation(doc, page, f"SECTION {label}-{label}", x, y - row_section_label_offset(scale, bb))
+    # Label goes just under the section's actual projected height (the paper
+    # height is the Z extent unless we're looking down the Z axis), clamped so
+    # it can never reach down into the title block band.
+    paper_h = (bb.YLength if abs(normal.z) > 0.5 else bb.ZLength) * scale
+    label_y = max(y - paper_h / 2.0 - 10.0, 68.0)
+    add_annotation(doc, page, f"SECTION {label}-{label}", x, label_y)
     return sview
-
-
-def row_section_label_offset(scale, bb):
-    # place the label just below the section view
-    return max(bb.YLength, bb.ZLength) * scale * 0.5 + 12.0
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +457,146 @@ def _extent_dim(doc, view, direction, tag, half_w, half_h):
     except Exception as exc:
         log(f"  extent dim {tag} skipped ({exc})")
         return None
+
+
+def projected_circles(view):
+    """
+    Enumerate the view's projected 2D edges and return circles as
+    (edge_index, radius, centre) in view-relative paper coordinates.
+    Only available after the page scene has been built (open_page_scene).
+    """
+    out = []
+    i = 0
+    while i < 300:
+        try:
+            e = view.getEdgeByIndex(i)
+        except Exception:
+            break
+        if e is None:
+            break
+        try:
+            if type(e.Curve).__name__ == "Circle":
+                out.append((i, float(e.Curve.Radius), e.Curve.Center))
+        except Exception:
+            pass
+        i += 1
+    return out
+
+
+def add_diameter_dims(doc, page, views, max_dims=8):
+    """
+    Add a diameter dimension for each UNIQUE hole diameter, on the first view
+    where a circle of that size projects.  Repeated diameters are dimensioned
+    once (counts are listed in the hole table instead), and the total is capped
+    to keep the sheet readable.
+    """
+    import math
+    seen = set()
+    count = 0
+    for view in views:
+        for idx, r, ctr in projected_circles(view):
+            key = round(2 * r, 2)
+            if key in seen:
+                continue
+            if count >= max_dims:
+                log(f"  (diameter dims capped at {max_dims})")
+                return
+            seen.add(key)
+            try:
+                dim = doc.addObject("TechDraw::DrawViewDimension",
+                                    f"Dia_{view.Name}_{idx}")
+                dim.Type = "Diameter"
+                dim.References2D = [(view, f"Edge{idx}")]
+                page.addView(dim)
+                # Place the label outward from the view centre.  Circles whose
+                # centre sits near the view origin (concentric bores/rims) all
+                # share the same radial direction, so rotate the angle per dim
+                # to fan their labels apart instead of stacking them.
+                n = math.hypot(ctr.x, ctr.y)
+                if n > 5.0:
+                    ux, uy = ctr.x / n, ctr.y / n
+                else:
+                    ang = math.radians(30 + 55 * count)
+                    ux, uy = math.cos(ang), math.sin(ang)
+                dim.X = ctr.x + (r + 12) * ux
+                dim.Y = ctr.y + (r + 10) * uy
+                count += 1
+            except Exception as exc:
+                log(f"  diameter dim on {view.Name} Edge{idx} skipped ({exc})")
+    log(f"  {count} diameter dimension(s) added")
+
+
+# ---------------------------------------------------------------------------
+# Hole table (from the 3D geometry, independent of what renders)
+# ---------------------------------------------------------------------------
+def detect_holes(shape):
+    """
+    Find Z-axis-aligned cylindrical holes: group cylindrical faces by
+    (axis position, radius), then keep only groups whose axis runs through
+    empty space (a point on the axis is NOT inside the solid) — this
+    distinguishes holes from bosses/hubs.
+    """
+    import math
+    solid = shape.Shape
+    groups = {}
+    for f in solid.Faces:
+        surf = f.Surface
+        if type(surf).__name__ != "Cylinder":
+            continue
+        if abs(surf.Axis.z) < 0.99:        # only vertical (top-view) holes
+            continue
+        c = surf.Center
+        key = (round(c.x, 2), round(c.y, 2), round(surf.Radius, 2))
+        zmin, zmax = f.BoundBox.ZMin, f.BoundBox.ZMax
+        com = f.CenterOfMass
+        if key in groups:
+            groups[key][0] = min(groups[key][0], zmin)
+            groups[key][1] = max(groups[key][1], zmax)
+        else:
+            groups[key] = [zmin, zmax, com]
+
+    holes = []
+    for (x, y, r), (z0, z1, com) in groups.items():
+        # Hole-vs-boss test: probe a point just INSIDE the cylindrical surface
+        # (between surface and axis, near the face's own angular position).
+        # Hole -> void there; boss -> solid material.  Probing the axis itself
+        # would misclassify hollow bosses (e.g. a hub around a bore).
+        rx, ry = com.x - x, com.y - y
+        n = math.hypot(rx, ry)
+        ux, uy = (rx / n, ry / n) if n > 1e-6 else (1.0, 0.0)
+        eps = min(0.2, r * 0.1)
+        probe = FreeCAD.Vector(x + ux * (r - eps), y + uy * (r - eps), com.z)
+        try:
+            if solid.isInside(probe, 1e-6, True):
+                continue                    # material inside surface -> a boss
+        except Exception:
+            pass
+        depth = z1 - z0
+        thru = depth >= solid.BoundBox.ZLength - 1e-3
+        holes.append({"x": x, "y": y, "dia": 2 * r, "depth": depth, "thru": thru})
+
+    holes.sort(key=lambda h: (h["dia"], h["x"], h["y"]))
+    log(f"  {len(holes)} hole(s) detected for hole table")
+    return holes
+
+
+def add_hole_table(doc, page, shape, holes, x, y):
+    bb = shape.Shape.BoundBox
+    lines = ["HOLE TABLE (X,Y FROM BOTTOM-LEFT, TOP VIEW)",
+             "TAG    DIA     X       Y       DEPTH"]
+    for i, h in enumerate(holes, 1):
+        depth = "THRU" if h["thru"] else f"{h['depth']:.1f}"
+        lines.append(f"H{i:<5} {h['dia']:<7.1f} {h['x'] - bb.XMin:<7.1f} "
+                     f"{h['y'] - bb.YMin:<7.1f} {depth}")
+    ann = doc.addObject("TechDraw::DrawViewAnnotation", "HoleTable")
+    ann.Text = lines
+    try:
+        ann.TextSize = 3.0
+    except Exception:
+        pass
+    page.addView(ann)
+    ann.X = x
+    ann.Y = y
 
 
 def auto_dimension(doc, page, front, right, shape):
