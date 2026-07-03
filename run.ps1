@@ -25,7 +25,8 @@ param(
     [string] $PartName  = "",   # title block: part title (default: file name)
     [string] $Material  = "",   # title block: material spec
     [string] $Author    = "",   # title block: designed-by
-    [string] $DrawingNo = ""    # title block: drawing number (default: file name)
+    [string] $DrawingNo = "",   # title block: drawing number (default: file name)
+    [string] $Tolerance = ""    # general-tolerance note (default: ISO 2768-mK)
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,6 +76,7 @@ $env:S2D_TITLE      = $PartName
 $env:S2D_MATERIAL   = $Material
 $env:S2D_AUTHOR     = $Author
 $env:S2D_DRAWING_NO = $DrawingNo
+if ($Tolerance -ne "") { $env:S2D_TOLERANCE = $Tolerance } else { Remove-Item Env:\S2D_TOLERANCE -ErrorAction SilentlyContinue }
 
 Write-Host "FreeCAD : $FreeCadExe"
 Write-Host "Script  : $Script  (exists=$(Test-Path $Script))"

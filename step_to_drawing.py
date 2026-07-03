@@ -341,7 +341,7 @@ def build_drawing(doc, shape, args):
     # ---- hole table ----------------------------------------------------------
     holes = detect_holes(shape)
     if holes:
-        add_hole_table(doc, page, shape, holes, *cell(2, 1))
+        add_hole_table(doc, page, shape, holes, sheet_w, cell(2, 1)[1])
 
     # ---- general notes (units + tolerances) ---------------------------------
     add_general_notes(doc, page, args, sheet_w, sheet_h)
@@ -621,22 +621,30 @@ def detect_holes(shape):
     return holes
 
 
-def add_hole_table(doc, page, shape, holes, x, y):
+def add_hole_table(doc, page, shape, holes, sheet_w, y):
     bb = shape.Shape.BoundBox
-    lines = ["HOLE TABLE (X,Y FROM BOTTOM-LEFT, TOP VIEW)",
-             "TAG    DIA     X       Y       DEPTH"]
+    hdr = f"{'TAG':<4}{'DIA':>7}{'X':>8}{'Y':>8}{'DEPTH':>8}"
+    lines = ["HOLE TABLE (mm, from datum corner)", hdr]
     for i, h in enumerate(holes, 1):
         depth = "THRU" if h["thru"] else f"{h['depth']:.1f}"
-        lines.append(f"H{i:<5} {h['dia']:<7.1f} {h['x'] - bb.XMin:<7.1f} "
-                     f"{h['y'] - bb.YMin:<7.1f} {depth}")
+        lines.append(f"{'H'+str(i):<4}{h['dia']:>7.1f}"
+                     f"{h['x'] - bb.XMin:>8.1f}{h['y'] - bb.YMin:>8.1f}"
+                     f"{depth:>8}")
+    text_size = 3.0
     ann = doc.addObject("TechDraw::DrawViewAnnotation", "HoleTable")
     ann.Text = lines
     try:
-        ann.TextSize = 3.0
+        ann.TextSize = text_size
+        # A monospaced font is required for the space-padded columns to align;
+        # the default (Segoe UI) is proportional and renders the table ragged.
+        ann.Font = "Courier New"
     except Exception:
         pass
     page.addView(ann)
-    ann.X = x
+    # Left-anchored text: right-align the block to the sheet margin so the
+    # widest line never runs past the border (Courier advance ~= 0.62*size).
+    width = max(len(s) for s in lines) * text_size * 0.62
+    ann.X = sheet_w - 14.0 - width
     ann.Y = y
 
 

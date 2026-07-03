@@ -6,12 +6,13 @@ Given any `.step` / `.stp` file it produces a single PDF containing:
 
 | Element | Description |
 |---|---|
-| **Front / Top / Right** | The three principal orthographic views |
+| **Front / Top / Right** | The three principal orthographic views, in correct **first-angle (ISO)** arrangement matching the title-block projection symbol |
 | **Isometric** | A reduced-scale (half) 3D view for reference |
 | **Section A–A** | A cross-section on the **auto-detected plane of symmetry**, revealing internal features |
 | **Envelope dimensions** | Overall width, height and depth |
 | **Diameter dimensions** | One ⌀ callout per unique circular feature, leader on the actual hole |
-| **Hole table** | Every Z-axis hole with tag, ⌀, X/Y position from the datum corner, and depth (`THRU` when through-going) — bosses/hubs are automatically excluded |
+| **Hole table** | Every Z-axis hole with tag, ⌀, X/Y position from the datum corner, and depth — `THRU` decided by local wall thickness (not part height); bosses/hubs excluded. Monospaced and right-aligned to the sheet |
+| **General notes** | Units (mm), general tolerances (ISO 2768, configurable), deburr / do-not-scale / material |
 | **Populated title block** | Part name, material, author, drawing number, date, scale, sheet — filled from command-line parameters |
 
 Everything runs headless from one command; a FreeCAD window flashes briefly and closes itself.
@@ -99,6 +100,7 @@ All dependencies satisfied.
 | `-Material` | Material spec (shown under the title) | blank |
 | `-Author` | "Designed by" field | blank |
 | `-DrawingNo` | Drawing number field | input file name |
+| `-Tolerance` | General-tolerance note / field | `ISO 2768-mK` |
 
 The launcher sets up PATH, passes parameters via environment variables, runs `freecad.exe`,
 and reports the resulting PDF (or prints the log if something went wrong).
@@ -165,8 +167,9 @@ The isometric view is drawn at half the main scale.
   and get diameter callouts where they project as circles, but are not listed in the table.
 - **Diameter callouts are per unique size** (one ⌀ per distinct diameter, capped at 8);
   counts and positions for repeated holes live in the hole table.
-- **No GD&T, tolerances, surface-finish symbols or datums** — tolerance intent is not
-  derivable from bare geometry, and FreeCAD's headless API doesn't expose these symbols.
+- **No per-feature GD&T, fits, surface-finish symbols or datums** — a *general* tolerance
+  note (ISO 2768) is added, but specific tolerances aren't derivable from bare geometry and
+  FreeCAD's headless API doesn't expose these symbols.
 - **Section hatching** is not applied (the cut face is shown without ISO hatching).
 - **Hole depth is the cylindrical-face extent**; counterbores/countersinks appear as separate
   table rows rather than a combined callout.
