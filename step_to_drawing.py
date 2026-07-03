@@ -85,6 +85,7 @@ def get_params():
             material=os.environ.get("S2D_MATERIAL") or None,
             author=os.environ.get("S2D_AUTHOR") or None,
             drawing_no=os.environ.get("S2D_DRAWING_NO") or None,
+            tolerance=os.environ.get("S2D_TOLERANCE") or "ISO 2768-mK",
         )
 
     raw = sys.argv[:]
@@ -103,6 +104,7 @@ def get_params():
     parser.add_argument("--material", default=None)
     parser.add_argument("--author", default=None)
     parser.add_argument("--drawing-no", dest="drawing_no", default=None)
+    parser.add_argument("--tolerance", default="ISO 2768-mK")
     return parser.parse_args(raw)
 
 
@@ -236,6 +238,8 @@ def fill_title_block(template, args, scale):
             val = today
         elif "sheet" in k:
             val = "1 / 1"
+        elif "tolerance" in k:
+            val = getattr(args, "tolerance", "") or ""
         if val is not None:
             texts[key] = val
             if val:
@@ -339,8 +343,32 @@ def build_drawing(doc, shape, args):
     if holes:
         add_hole_table(doc, page, shape, holes, *cell(2, 1))
 
+    # ---- general notes (units + tolerances) ---------------------------------
+    add_general_notes(doc, page, args, sheet_w, sheet_h)
+
     doc.recompute()
     return page
+
+
+def add_general_notes(doc, page, args, sheet_w, sheet_h):
+    tol = getattr(args, "tolerance", None) or "ISO 2768-mK"
+    lines = ["NOTES:",
+             "1. ALL DIMENSIONS IN MILLIMETRES.",
+             f"2. GENERAL TOLERANCES PER {tol}.",
+             "3. REMOVE ALL BURRS AND SHARP EDGES.",
+             "4. DO NOT SCALE FROM DRAWING."]
+    if args.material:
+        lines.append(f"5. MATERIAL: {args.material}.")
+    ann = doc.addObject("TechDraw::DrawViewAnnotation", "GeneralNotes")
+    ann.Text = lines
+    try:
+        ann.TextSize = 3.0
+    except Exception:
+        pass
+    page.addView(ann)
+    ann.X = sheet_w * 0.14          # top-left, above the Right/Front views
+    ann.Y = sheet_h - 26.0          # clear of the top border/zone markers
+    return ann
 
 
 def open_page_scene(doc, page):
