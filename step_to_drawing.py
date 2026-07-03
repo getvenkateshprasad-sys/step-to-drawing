@@ -303,12 +303,16 @@ def build_drawing(doc, shape, args):
     fill_title_block(template, args, scale)
 
     V = FreeCAD.Vector
-    # Standard TechDraw viewing directions (normal points from part to viewer)
-    front = add_view(doc, page, shape, "Front", *cell(0, 0), scale,
+    # FIRST-ANGLE (ISO E) projection layout, matching the projection symbol in
+    # the ISO title block:
+    #   Front centre-top; Top BELOW front; Right-side view LEFT of front.
+    #     [Right ] [Front] [ISO  ]
+    #     [Sectn ] [Top  ] [Table]
+    front = add_view(doc, page, shape, "Front", *cell(1, 0), scale,
                      V(0, -1, 0), V(1, 0, 0))
-    top = add_view(doc, page, shape, "Top", *cell(1, 0), scale,
+    top = add_view(doc, page, shape, "Top", *cell(1, 1), scale,
                    V(0, 0, 1), V(1, 0, 0))
-    right = add_view(doc, page, shape, "Right", *cell(0, 1), scale,
+    right = add_view(doc, page, shape, "Right", *cell(0, 0), scale,
                      V(1, 0, 0), V(0, 1, 0))
     iso = add_view(doc, page, shape, "Isometric", *cell(2, 0), iso_scale,
                    V(1, -1, 1), V(1, 0, -1))
@@ -318,7 +322,7 @@ def build_drawing(doc, shape, args):
 
     # ---- section on the detected symmetry plane -----------------------------
     label, normal, origin = detect_symmetry_plane(shape)
-    sx, sy = cell(1, 1)
+    sx, sy = cell(0, 1)
     build_section(doc, page, shape, normal, origin, label, scale, sx, sy)
     doc.recompute()
 
