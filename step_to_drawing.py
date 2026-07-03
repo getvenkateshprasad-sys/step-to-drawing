@@ -736,6 +736,17 @@ def main():
     log("Exporting PDF")
     export_pdf(doc, page, pdf_path)
 
+    # Save the editable FreeCAD document next to the PDF so the drawing can be
+    # opened in FreeCAD/TechDraw and finished by hand (tolerances, GD&T,
+    # hatching, layout tweaks).  Everything — views, dimensions, section, hole
+    # table, title block — is retained and fully editable.
+    fcstd_path = os.path.splitext(pdf_path)[0] + ".FCStd"
+    try:
+        doc.saveAs(fcstd_path)
+        log(f"FreeCAD document saved -> {fcstd_path}  ({os.path.getsize(fcstd_path)} bytes)")
+    except Exception as exc:
+        log(f"  (could not save .FCStd: {exc})")
+
     FreeCAD.closeDocument(doc.Name)
     log("Done.")
     hard_exit(0)

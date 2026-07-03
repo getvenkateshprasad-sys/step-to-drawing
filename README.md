@@ -17,6 +17,12 @@ Given any `.step` / `.stp` file it produces a single PDF containing:
 
 Everything runs headless from one command; a FreeCAD window flashes briefly and closes itself.
 
+Each run produces **two files** next to the input: the **PDF** and an editable **`.FCStd`**
+FreeCAD document. Open the `.FCStd` in FreeCAD's TechDraw workbench to finish the drawing by
+hand — add tolerances, GD&T, surface-finish symbols, hatching, or tweak the layout — then
+re-export. All auto-generated views, dimensions, section, hole table and title block are
+retained and fully editable.
+
 ---
 
 ## Example output
