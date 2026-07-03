@@ -1,0 +1,222 @@
+# -*- coding: utf-8 -*-
+"""
+StepToDrawing.FCMacro
+---------------------
+FreeCAD macro: a dialog front-end for step_to_drawing.py.
+
+Pick a STEP file and metadata, click Generate, and the multi-view drawing is
+built IN THIS FreeCAD session and left open in TechDraw so you can finish it
+by hand (tolerances, GD&T, hatching).  PDF and/or .FCStd are written too.
+
+INSTALL
+    Put this file and step_to_drawing.py in the same folder, then either:
+      * copy both into your FreeCAD macro folder
+        (Macro -> Macros... -> shows the folder), or
+      * leave them in the repo and set ENGINE_DIR below.
+    Run from  Macro -> Macros... -> StepToDrawing -> Execute.
+"""
+
+import os
+import sys
+
+# --- locate the engine (step_to_drawing.py) -------------------------------
+# Same folder as this macro first, then an explicit fallback path.
+ENGINE_DIR = r"D:\`AI_Models\Claude_Code\step-to-drawing"
+_here = None
+try:
+    _here = os.path.dirname(os.path.abspath(__file__))
+except Exception:
+    pass
+for d in (_here, ENGINE_DIR):
+    if d and d not in sys.path and os.path.isfile(os.path.join(d, "step_to_drawing.py")):
+        sys.path.insert(0, d)
+
+import FreeCAD
+import FreeCADGui as Gui
+
+try:
+    import step_to_drawing as s2d
+except ImportError as exc:
+    FreeCAD.Console.PrintError(
+        "StepToDrawing: cannot find step_to_drawing.py. "
+        "Put it next to this macro or set ENGINE_DIR. (%s)\n" % exc)
+    raise
+
+# --- Qt (FreeCAD's PySide shim -> whatever Qt build is in use) -------------
+try:
+    from PySide import QtWidgets, QtCore
+except ImportError:
+    from PySide2 import QtWidgets, QtCore
+
+
+SHEETS = ["A4", "A3", "A2", "A1", "A0"]
+
+
+class StepToDrawingDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None):
+        super(StepToDrawingDialog, self).__init__(parent)
+        self.setWindowTitle("STEP -> 2D Drawing")
+        self.setMinimumWidth(460)
+        form = QtWidgets.QFormLayout(self)
+
+        # STEP file + browse
+        self.stepEdit = QtWidgets.QLineEdit()
+        b1 = QtWidgets.QPushButton("Browse...")
+        b1.clicked.connect(self._pick_step)
+        form.addRow("STEP file:", self._row(self.stepEdit, b1))
+
+        # save folder + browse
+        self.dirEdit = QtWidgets.QLineEdit()
+        b2 = QtWidgets.QPushButton("Browse...")
+        b2.clicked.connect(self._pick_dir)
+        form.addRow("Save to folder:", self._row(self.dirEdit, b2))
+
+        # file name
+        self.nameEdit = QtWidgets.QLineEdit()
+        self.nameEdit.setPlaceholderText("(defaults to STEP file name)")
+        form.addRow("File name:", self.nameEdit)
+
+        # sheet + scale
+        self.sheetCombo = QtWidgets.QComboBox()
+        self.sheetCombo.addItems(SHEETS)
+        self.sheetCombo.setCurrentText("A3")
+        self.scaleEdit = QtWidgets.QLineEdit("Auto")
+        self.scaleEdit.setToolTip("Auto, or a ratio like 1:2 or 2:1")
+        form.addRow("Sheet size:", self.sheetCombo)
+        form.addRow("Scale:", self.scaleEdit)
+
+        # title-block metadata
+        self.titleEdit = QtWidgets.QLineEdit()
+        self.titleEdit.setPlaceholderText("(defaults to file name)")
+        self.numberEdit = QtWidgets.QLineEdit()
+        self.materialEdit = QtWidgets.QLineEdit()
+        self.authorEdit = QtWidgets.QLineEdit()
+        self.revEdit = QtWidgets.QLineEdit()
+        self.tolEdit = QtWidgets.QLineEdit("ISO 2768-mK")
+        form.addRow("Part name:", self.titleEdit)
+        form.addRow("Part number:", self.numberEdit)
+        form.addRow("Material:", self.materialEdit)
+        form.addRow("Creator:", self.authorEdit)
+        form.addRow("Version / rev:", self.revEdit)
+        form.addRow("Tolerance:", self.tolEdit)
+
+        # outputs
+        self.pdfChk = QtWidgets.QCheckBox("PDF")
+        self.pdfChk.setChecked(True)
+        self.fcstdChk = QtWidgets.QCheckBox("Editable .FCStd")
+        self.fcstdChk.setChecked(True)
+        self.openChk = QtWidgets.QCheckBox("Open result when done")
+        self.openChk.setChecked(True)
+        outs = QtWidgets.QHBoxLayout()
+        outs.addWidget(self.pdfChk)
+        outs.addWidget(self.fcstdChk)
+        outs.addStretch(1)
+        form.addRow("Output:", outs)
+        form.addRow("", self.openChk)
+
+        # buttons
+        bb = QtWidgets.QDialogButtonBox()
+        self.genBtn = bb.addButton("Generate", QtWidgets.QDialogButtonBox.AcceptRole)
+        bb.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._on_generate)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    # -- helpers ----------------------------------------------------------
+    def _row(self, edit, btn):
+        w = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(edit)
+        h.addWidget(btn)
+        return w
+
+    def _pick_step(self):
+        fn, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select STEP file", self.stepEdit.text() or "",
+            "STEP files (*.step *.stp *.STEP *.STP);;All files (*)")
+        if fn:
+            self.stepEdit.setText(fn)
+            if not self.dirEdit.text():
+                self.dirEdit.setText(os.path.dirname(fn))
+            if not self.nameEdit.text():
+                self.nameEdit.setText(os.path.splitext(os.path.basename(fn))[0])
+
+    def _pick_dir(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select output folder", self.dirEdit.text() or "")
+        if d:
+            self.dirEdit.setText(d)
+
+    def _warn(self, msg):
+        QtWidgets.QMessageBox.warning(self, "STEP -> 2D Drawing", msg)
+
+    # -- run --------------------------------------------------------------
+    def _on_generate(self):
+        step = self.stepEdit.text().strip()
+        if not step or not os.path.isfile(step):
+            return self._warn("Please choose a valid STEP file.")
+        outputs = []
+        if self.pdfChk.isChecked():
+            outputs.append("pdf")
+        if self.fcstdChk.isChecked():
+            outputs.append("fcstd")
+        if not outputs:
+            return self._warn("Select at least one output (PDF or .FCStd).")
+
+        args = s2d.make_params(
+            input=step,
+            output_dir=self.dirEdit.text().strip() or None,
+            name=self.nameEdit.text().strip() or None,
+            sheet=self.sheetCombo.currentText(),
+            title=self.titleEdit.text().strip() or None,
+            drawing_no=self.numberEdit.text().strip() or None,
+            material=self.materialEdit.text().strip() or None,
+            author=self.authorEdit.text().strip() or None,
+            revision=self.revEdit.text().strip() or None,
+            tolerance=self.tolEdit.text().strip() or "ISO 2768-mK",
+            scale=self.scaleEdit.text().strip() or "auto",
+            outputs=outputs,
+        )
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            res = s2d.generate(args, keep_open=True)
+        except Exception as exc:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            return self._warn("Generation failed:\n%s" % exc)
+        QtWidgets.QApplication.restoreOverrideCursor()
+
+        # show the finished page in TechDraw for manual editing
+        try:
+            Gui.activateWorkbench("TechDrawWorkbench")
+            Gui.getDocument(res.doc.Name).getObject(res.page.Name).doubleClicked()
+            Gui.updateGui()
+        except Exception:
+            pass
+
+        if self.openChk.isChecked():
+            target = res.written.get("pdf") or res.written.get("fcstd")
+            if target and hasattr(os, "startfile"):
+                try:
+                    os.startfile(target)          # Windows default viewer
+                except Exception:
+                    pass
+
+        made = ", ".join(os.path.basename(p) for p in res.written.values())
+        QtWidgets.QMessageBox.information(
+            self, "STEP -> 2D Drawing",
+            "Done.\nWrote: %s\n\nThe drawing is open in TechDraw for editing."
+            % (made or "(nothing)"))
+        self.accept()
+
+
+def show():
+    dlg = StepToDrawingDialog(Gui.getMainWindow())
+    dlg.exec_() if hasattr(dlg, "exec_") else dlg.exec()
+
+
+# Auto-open the dialog when run as a macro; a test harness can set
+# S2D_TEST=True in globals() before exec() to import the class without opening.
+if not globals().get("S2D_TEST"):
+    show()

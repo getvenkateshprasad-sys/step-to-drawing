@@ -65,6 +65,27 @@ def log(msg):
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+def make_params(input, output=None, output_dir=None, name=None, sheet="A3",
+                title=None, material=None, author=None, drawing_no=None,
+                revision=None, tolerance="ISO 2768-mK", scale="auto",
+                outputs=("pdf", "fcstd")):
+    """Build a complete, normalised parameter set (used by CLI, env and UI)."""
+    sheet = (sheet or "A3").upper()
+    if sheet not in SHEET_SIZES:
+        sheet = "A3"
+    if isinstance(outputs, str):
+        outputs = [o.strip().lower() for o in outputs.split(",") if o.strip()]
+    outputs = tuple(o for o in outputs if o in ("pdf", "fcstd")) or ("pdf",)
+    return SimpleNamespace(
+        input=input, output=output or None, output_dir=output_dir or None,
+        name=name or None, sheet=sheet, title=title or None,
+        material=material or None, author=author or None,
+        drawing_no=drawing_no or None, revision=revision or None,
+        tolerance=tolerance or "ISO 2768-mK", scale=scale or "auto",
+        outputs=outputs,
+    )
+
+
 def get_params():
     """
     Parameters arrive via environment variables (set by run.ps1) because the
@@ -74,18 +95,20 @@ def get_params():
     """
     env_input = os.environ.get("S2D_INPUT")
     if env_input:
-        sheet = os.environ.get("S2D_SHEET", "A3").upper()
-        if sheet not in SHEET_SIZES:
-            sheet = "A3"
-        return SimpleNamespace(
+        return make_params(
             input=env_input,
-            output=os.environ.get("S2D_OUTPUT") or None,
-            sheet=sheet,
-            title=os.environ.get("S2D_TITLE") or None,
-            material=os.environ.get("S2D_MATERIAL") or None,
-            author=os.environ.get("S2D_AUTHOR") or None,
-            drawing_no=os.environ.get("S2D_DRAWING_NO") or None,
+            output=os.environ.get("S2D_OUTPUT"),
+            output_dir=os.environ.get("S2D_OUTDIR"),
+            name=os.environ.get("S2D_NAME"),
+            sheet=os.environ.get("S2D_SHEET", "A3"),
+            title=os.environ.get("S2D_TITLE"),
+            material=os.environ.get("S2D_MATERIAL"),
+            author=os.environ.get("S2D_AUTHOR"),
+            drawing_no=os.environ.get("S2D_DRAWING_NO"),
+            revision=os.environ.get("S2D_REVISION"),
             tolerance=os.environ.get("S2D_TOLERANCE") or "ISO 2768-mK",
+            scale=os.environ.get("S2D_SCALE", "auto"),
+            outputs=os.environ.get("S2D_OUTPUTS", "pdf,fcstd"),
         )
 
     raw = sys.argv[:]
@@ -94,18 +117,39 @@ def get_params():
     else:
         raw = [a for a in raw[1:] if not a.lower().endswith((".py", ".exe"))]
 
-    parser = argparse.ArgumentParser(description="STEP -> 2D Engineering Drawing PDF")
-    parser.add_argument("input", help="Path to input .step / .stp file")
-    parser.add_argument("output", nargs="?", default=None,
-                        help="Output PDF path (default: input name + .pdf)")
-    parser.add_argument("--sheet", choices=list(SHEET_SIZES),
-                        default="A3", help="Drawing sheet size. Default: A3")
-    parser.add_argument("--title", default=None)
-    parser.add_argument("--material", default=None)
-    parser.add_argument("--author", default=None)
-    parser.add_argument("--drawing-no", dest="drawing_no", default=None)
-    parser.add_argument("--tolerance", default="ISO 2768-mK")
-    return parser.parse_args(raw)
+    p = argparse.ArgumentParser(description="STEP -> 2D Engineering Drawing PDF")
+    p.add_argument("input", help="Path to input .step / .stp file")
+    p.add_argument("output", nargs="?", default=None,
+                   help="Output PDF path (default: input name + .pdf)")
+    p.add_argument("--outdir", default=None)
+    p.add_argument("--name", default=None)
+    p.add_argument("--sheet", choices=list(SHEET_SIZES), default="A3")
+    p.add_argument("--title", default=None)
+    p.add_argument("--material", default=None)
+    p.add_argument("--author", default=None)
+    p.add_argument("--drawing-no", dest="drawing_no", default=None)
+    p.add_argument("--revision", default=None)
+    p.add_argument("--tolerance", default="ISO 2768-mK")
+    p.add_argument("--scale", default="auto")
+    p.add_argument("--outputs", default="pdf,fcstd")
+    a = p.parse_args(raw)
+    return make_params(**vars(a))
+
+
+def parse_scale(s):
+    """'auto'/'' -> None (auto-fit); '1:2' -> 0.5; '2:1' or '2' -> 2.0."""
+    if not s:
+        return None
+    s = str(s).strip().lower()
+    if s in ("auto", ""):
+        return None
+    try:
+        if ":" in s:
+            a, b = s.split(":")
+            return float(a) / float(b)
+        return float(s)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +284,8 @@ def fill_title_block(template, args, scale):
             val = "1 / 1"
         elif "tolerance" in k:
             val = getattr(args, "tolerance", "") or ""
+        elif "revision" in k or k == "rev":
+            val = getattr(args, "revision", "") or ""
         if val is not None:
             texts[key] = val
             if val:
@@ -301,7 +347,8 @@ def build_drawing(doc, shape, args):
     def cell(col, row):
         return col_x[int(col)], (top_y if row < 0.5 else bot_y)
 
-    scale = compute_scale(shape, col_w * 0.75, row_h * 0.75)
+    scale = parse_scale(getattr(args, "scale", None)) \
+        or compute_scale(shape, col_w * 0.75, row_h * 0.75)
     iso_scale = scale / 2.0
     log(f"  main scale {fmt_scale(scale)}, iso scale {fmt_scale(iso_scale)}")
     fill_title_block(template, args, scale)
@@ -714,17 +761,35 @@ def hard_exit(code=0):
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Path resolution
 # ---------------------------------------------------------------------------
-def main():
-    global _LOG_PATH
-    args = get_params()
-
+def resolve_paths(args):
+    """Return (step_path, pdf_path, fcstd_path, log_path)."""
     step_path = os.path.abspath(args.input)
-    pdf_path = (os.path.abspath(args.output) if args.output
-                else os.path.splitext(step_path)[0] + ".pdf")
-    _LOG_PATH = os.path.splitext(pdf_path)[0] + ".log"
-    open(_LOG_PATH, "w", encoding="utf-8").close()
+    if args.output:                                   # explicit full PDF path wins
+        pdf_path = os.path.abspath(args.output)
+    else:
+        base = args.name or os.path.splitext(os.path.basename(step_path))[0]
+        out_dir = os.path.abspath(args.output_dir) if args.output_dir \
+            else os.path.dirname(step_path)
+        pdf_path = os.path.join(out_dir, base + ".pdf")
+    stem = os.path.splitext(pdf_path)[0]
+    return step_path, pdf_path, stem + ".FCStd", stem + ".log"
+
+
+# ---------------------------------------------------------------------------
+# Core: build + export.  Reused by the CLI (main) and the FreeCAD UI macro.
+# generate() never calls os._exit and, with keep_open=True, leaves the finished
+# document open in the running FreeCAD session for manual editing.
+# ---------------------------------------------------------------------------
+def generate(args, keep_open=False):
+    global _LOG_PATH
+    step_path, pdf_path, fcstd_path, log_path = resolve_paths(args)
+    _LOG_PATH = log_path
+    try:
+        open(_LOG_PATH, "w", encoding="utf-8").close()
+    except Exception:
+        _LOG_PATH = None
 
     log(f"Importing {step_path}")
     doc = FreeCAD.newDocument("StepDrawing")
@@ -733,32 +798,57 @@ def main():
     log("Building drawing")
     page = build_drawing(doc, shape, args)
 
-    log("Exporting PDF")
-    export_pdf(doc, page, pdf_path)
+    written = {}
+    if "pdf" in args.outputs:
+        log("Exporting PDF")
+        export_pdf(doc, page, pdf_path)
+        written["pdf"] = pdf_path
+    else:
+        open_page_scene(doc, page)                    # ensure geometry is realised
 
-    # Save the editable FreeCAD document next to the PDF so the drawing can be
-    # opened in FreeCAD/TechDraw and finished by hand (tolerances, GD&T,
-    # hatching, layout tweaks).  Everything — views, dimensions, section, hole
-    # table, title block — is retained and fully editable.
-    fcstd_path = os.path.splitext(pdf_path)[0] + ".FCStd"
-    try:
-        doc.saveAs(fcstd_path)
-        log(f"FreeCAD document saved -> {fcstd_path}  ({os.path.getsize(fcstd_path)} bytes)")
-    except Exception as exc:
-        log(f"  (could not save .FCStd: {exc})")
+    if "fcstd" in args.outputs:
+        try:
+            doc.saveAs(fcstd_path)
+            log(f"FreeCAD document saved -> {fcstd_path}  "
+                f"({os.path.getsize(fcstd_path)} bytes)")
+            written["fcstd"] = fcstd_path
+        except Exception as exc:
+            log(f"  (could not save .FCStd: {exc})")
 
-    FreeCAD.closeDocument(doc.Name)
+    if not keep_open:
+        FreeCAD.closeDocument(doc.Name)
     log("Done.")
+    return SimpleNamespace(doc=doc, page=page, written=written,
+                           pdf=pdf_path, fcstd=fcstd_path)
+
+
+# ---------------------------------------------------------------------------
+# Headless entry point
+# ---------------------------------------------------------------------------
+def main():
+    generate(get_params(), keep_open=False)
     hard_exit(0)
 
 
-# NOTE: FreeCAD's binaries execute a passed script with __name__ set to the
-# module name, NOT "__main__", so a normal `if __name__ == "__main__"` guard
-# would never fire.  Run unconditionally (this file is only ever an entry point).
-try:
-    main()
-except SystemExit:
-    raise
-except BaseException as exc:
-    log(f"FATAL: {exc!r}")
-    hard_exit(1)
+def _running_as_entry_script():
+    """
+    True only when launched as the headless drawing script (env var set by
+    run.ps1, or a .step given on the command line).  Returns False when the
+    module is merely imported — e.g. by the FreeCAD UI macro — so importing it
+    never triggers a run or the hard exit.
+    """
+    if os.environ.get("S2D_INPUT"):
+        return True
+    return any(a.lower().endswith((".step", ".stp")) for a in sys.argv[1:])
+
+
+if _running_as_entry_script():
+    # FreeCAD executes a passed script with __name__ = the module name (not
+    # "__main__"), so the usual guard can't be used here.
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        log(f"FATAL: {exc!r}")
+        hard_exit(1)

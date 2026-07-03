@@ -85,7 +85,20 @@ All dependencies satisfied.
 
 ## Usage
 
-### Recommended — the launcher
+### Option 1 — GUI (FreeCAD macro)
+
+For a point-and-click workflow: open FreeCAD → **Macro → Macros…** → run
+`StepToDrawing` → a dialog lets you pick the STEP file, output folder and name,
+sheet size, scale, title-block fields (part name/number, material, creator,
+version), tolerance and outputs (PDF / .FCStd). Click **Generate** and the
+drawing is built in the session and opened in TechDraw so you can finish it by
+hand, with the files written alongside.
+
+Install: copy `StepToDrawing.FCMacro` **and** `step_to_drawing.py` into your
+FreeCAD macro folder (the path is shown in Macro → Macros…), or leave them in
+the repo and set `ENGINE_DIR` at the top of the macro.
+
+### Option 2 — command line (headless launcher)
 
 ```powershell
 # output PDF is written next to the input file
@@ -202,11 +215,16 @@ block are correct, to scale, and produced fully automatically.
 
 ```
 step-to-drawing/
-├── step_to_drawing.py   # main script (run under freecad.exe)
-├── run.ps1              # Windows launcher — sets up env and runs it
-├── install.py           # dependency checker (run under freecadcmd)
+├── step_to_drawing.py     # drawing engine (run under freecad.exe, or import & call generate())
+├── StepToDrawing.FCMacro  # GUI: FreeCAD macro + dialog (Option 1)
+├── run.ps1                # CLI launcher — sets up env and runs it (Option 2)
+├── install.py             # dependency checker (run under freecadcmd)
 └── README.md
 ```
+
+Both front-ends share one engine: `step_to_drawing.generate(args)` builds the
+drawing; the macro calls it in-session (`keep_open=True`), the launcher runs it
+headless. `make_params(...)` builds the parameter set for either.
 
 ---
 
