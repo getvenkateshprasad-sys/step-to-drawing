@@ -576,7 +576,16 @@ def detect_holes(shape):
         except Exception:
             pass
         depth = z1 - z0
-        thru = depth >= solid.BoundBox.ZLength - 1e-3
+        # THRU if BOTH axis ends open into free space (i.e. the hole passes
+        # completely through the LOCAL wall), regardless of the part's overall
+        # height.  A blind hole has material just beyond its floor.
+        eps2 = 0.1
+        try:
+            below = not solid.isInside(FreeCAD.Vector(x, y, z0 - eps2), 1e-6, True)
+            above = not solid.isInside(FreeCAD.Vector(x, y, z1 + eps2), 1e-6, True)
+            thru = below and above
+        except Exception:
+            thru = depth >= solid.BoundBox.ZLength - 1e-3
         holes.append({"x": x, "y": y, "dia": 2 * r, "depth": depth, "thru": thru})
 
     holes.sort(key=lambda h: (h["dia"], h["x"], h["y"]))
