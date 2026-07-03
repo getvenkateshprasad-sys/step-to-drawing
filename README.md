@@ -13,7 +13,8 @@ Given any `.step` / `.stp` file it produces a single PDF containing:
 | **Diameter dimensions** | One ⌀ callout per unique circular feature, leader on the actual hole |
 | **Hole table** | Every Z-axis hole with tag, ⌀, X/Y position from the datum corner, and depth — `THRU` decided by local wall thickness (not part height); bosses/hubs excluded. Monospaced and right-aligned to the sheet |
 | **General notes** | Units (mm), general tolerances (ISO 2768, configurable), deburr / do-not-scale / material |
-| **Populated title block** | Part name, material, author, drawing number, date, scale, sheet — filled from command-line parameters |
+| **Compact title block** | Custom clean block (no bulky frame, no A–G/1–4 zone markers) filled from parameters: title, part no., material, scale, drawn-by, date, sheet, rev, general tolerance, size |
+| **General notes** | Units, general tolerance, deburr, do-not-scale, material — small text, top-left |
 
 Everything runs headless from one command; a FreeCAD window flashes briefly and closes itself.
 
@@ -208,6 +209,7 @@ block are correct, to scale, and produced fully automatically.
 | PDF has views but value shows `0` | The page scene wasn't built before dimensioning — this is handled by the script; if you modified it, keep `open_page_scene()` before `auto_dimension()`. |
 | Window stays open / hangs | Don't set `QT_QPA_PLATFORM=offscreen` (it deadlocks); the script hard-exits after export. |
 | `No solid geometry found` | The STEP is surface-only or empty — check it in a viewer. |
+| Edits to the script seem ignored / old output | FreeCAD mishandles script paths containing a backtick (e.g. `D:\`AI_Models\...`) and caches by filename. `run.ps1` works around this by copying the engine to a clean temp path under a unique name before running. |
 
 ---
 

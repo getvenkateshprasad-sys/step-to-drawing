@@ -237,16 +237,83 @@ SHEET_SIZES = {
 }
 
 def template_path(sheet):
-    """Prefer a template with a title block; fall back to the blank sheet."""
-    base = FreeCAD.getResourceDir() + "Mod/TechDraw/Templates/ISO/"
-    for name in (f"{sheet}_Landscape_TD.svg",
-                 f"{sheet}_Landscape_ISO5457_advanced.svg",
-                 f"{sheet}_Landscape_blank.svg"):
-        path = os.path.join(base, name)
-        if os.path.isfile(path):
-            return path
-    sys.exit(f"No TechDraw template found for {sheet} under {base}\n"
-             "Your FreeCAD install may be missing bundled templates.")
+    """
+    Return a clean, compact custom template we generate ourselves.
+
+    Stock ISO templates were unreliable: field keys differ between sheet sizes
+    AND between FreeCAD installs (conda vs Program Files), some Scale/Sheet cells
+    are non-editable static text, and they carry a bulky title block plus A-G/1-4
+    border zone markers.  Generating our own gives a small title block, known
+    editable-field keys (so every field fills), and no zone clutter.  Falls back
+    to a stock template only if writing ours fails.
+    """
+    W, H = SHEET_SIZES[sheet]
+    try:
+        tdir = os.path.join(FreeCAD.getUserAppDataDir(), "s2d_templates")
+        os.makedirs(tdir, exist_ok=True)
+        path = os.path.join(tdir, f"s2d_{sheet}.svg")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_template_svg(W, H))
+        return path
+    except Exception as exc:
+        log(f"  (custom template failed: {exc}; using stock)")
+        base = FreeCAD.getResourceDir() + "Mod/TechDraw/Templates/ISO/"
+        for name in (f"{sheet}_Landscape_TD.svg", f"{sheet}_Landscape_blank.svg"):
+            p = os.path.join(base, name)
+            if os.path.isfile(p):
+                return p
+        sys.exit(f"No template available for {sheet}.")
+
+
+def _template_svg(W, H):
+    """Minimal landscape SVG: thin border + compact bottom-right title block
+    with FreeCAD editable fields (keys chosen so fill_title_block hits them).
+    No border zone markers."""
+    m = 7.0
+    bw = min(180.0, W - 2 * m - 2.0)
+    bh = 34.0
+    bx = W - m - bw
+    by = H - m - bh
+    r1, r2, r3 = 12.0, 19.5, 27.0
+    c1 = bx + bw / 3.0
+    c2 = bx + 2.0 * bw / 3.0
+    L = ['<?xml version="1.0" encoding="UTF-8"?>',
+         '<svg xmlns="http://www.w3.org/2000/svg" '
+         'xmlns:freecad="https://www.freecad.org/wiki/index.php?title=Svg_Namespace" '
+         f'width="{W}mm" height="{H}mm" viewBox="0 0 {W} {H}">',
+         '<g fill="none" stroke="#000000" stroke-width="0.35">',
+         f'<rect x="{m}" y="{m}" width="{W-2*m}" height="{H-2*m}"/>',
+         f'<rect x="{bx}" y="{by}" width="{bw}" height="{bh}"/>']
+    for ry in (r1, r2, r3):
+        L.append(f'<line x1="{bx}" y1="{by+ry}" x2="{bx+bw}" y2="{by+ry}"/>')
+    for cx in (c1, c2):
+        L.append(f'<line x1="{cx}" y1="{by+r1}" x2="{cx}" y2="{by+bh}"/>')
+    L.append('</g>')
+    L.append('<g font-family="sans-serif" fill="#000000" stroke="none">')
+
+    def cell(x, y, lab, key, default):
+        L.append(f'<text x="{x+1.2}" y="{y+2.6}" font-size="1.9" '
+                 f'fill="#555555">{lab}</text>')
+        # FreeCAD reads/writes the editable value from a <tspan> child.
+        L.append(f'<text x="{x+1.2}" y="{y+6.4}" font-size="3.0" '
+                 f'freecad:editable="{key}"><tspan>{default}</tspan></text>')
+
+    L.append(f'<text x="{bx+1.2}" y="{by+2.6}" font-size="1.9" '
+             f'fill="#555555">TITLE</text>')
+    L.append(f'<text x="{bx+1.5}" y="{by+9.5}" font-size="5.2" '
+             f'freecad:editable="s2d_title"><tspan>TITLE</tspan></text>')
+    cell(bx, by + r1, "PART NO.",  "s2d_number",    "-")
+    cell(c1, by + r1, "MATERIAL",  "s2d_material",  "-")
+    cell(c2, by + r1, "SCALE",     "s2d_scale",     "1:1")
+    cell(bx, by + r2, "DRAWN BY",  "s2d_author",    "-")
+    cell(c1, by + r2, "DATE",      "s2d_date",      "-")
+    cell(c2, by + r2, "SHEET",     "s2d_sheet",     "1 / 1")
+    cell(bx, by + r3, "REV",       "s2d_rev",       "-")
+    cell(c1, by + r3, "GEN. TOL.", "s2d_tolerance", "ISO 2768-mK")
+    cell(c2, by + r3, "SIZE",      "s2d_size",      "")
+    L.append('</g>')
+    L.append('</svg>')
+    return "\n".join(L)
 
 
 def fill_title_block(template, args, scale):
@@ -262,38 +329,41 @@ def fill_title_block(template, args, scale):
         texts = dict(template.EditableTexts)
     except Exception:
         return
-    filled = []
-    for key in texts:
+    # Field keys differ between templates (A3 TD uses 'scale'/'SheetNumber';
+    # A4 TD uses 'FC-SC'/'FC-SH'), so match a range of variants.  Any field we
+    # don't have data for is BLANKED so no ALL-CAPS placeholder text is left on
+    # the sheet.  'sheet' is tested before 'number' (SheetNumber contains both).
+    for key in list(texts):
         k = key.lower()
-        val = None
+        if "copyright" in k:
+            continue
         if "subtitle" in k:
-            val = f"Material: {args.material}" if args.material else ""
+            v = f"Material: {args.material}" if args.material else ""
         elif "title" in k:
-            val = title
+            v = title
         elif "material" in k:
-            val = args.material or ""
-        elif any(s in k for s in ("author", "creator", "designed")):
-            val = args.author or ""
-        elif "drawing_number" in k or k == "number":
-            val = number
-        elif "scale" in k:
-            val = fmt_scale(scale)
-        elif "creation" in k or "date_of_issue" in k:
-            val = today
-        elif "sheet" in k:
-            val = "1 / 1"
+            v = args.material or ""
+        elif any(t in k for t in ("author", "creator", "designed")):
+            v = args.author or ""
+        elif "sheet" in k or k.endswith(("-sh", "_sh")):
+            v = "1 / 1"
+        elif "number" in k or "drawing_number" in k:
+            v = number
+        elif "scale" in k or k.endswith(("-sc", "_sc")):
+            v = fmt_scale(scale)
         elif "tolerance" in k:
-            val = getattr(args, "tolerance", "") or ""
-        elif "revision" in k or k == "rev":
-            val = getattr(args, "revision", "") or ""
-        if val is not None:
-            texts[key] = val
-            if val:
-                filled.append(key)
+            v = getattr(args, "tolerance", "") or ""
+        elif "rev" in k:
+            v = getattr(args, "revision", "") or "-"
+        elif "size" in k:
+            v = args.sheet
+        elif "date" in k:
+            v = today
+        else:
+            v = ""                       # blank leftover placeholder cells
+        texts[key] = v
     try:
         template.EditableTexts = texts
-        if filled:
-            log(f"  title block: {', '.join(filled)}")
     except Exception as exc:
         log(f"  (title block fill failed: {exc})")
 
@@ -320,11 +390,31 @@ def fmt_scale(s):
     return f"1:{int(round(1 / s))}"
 
 
+# Text sizes (mm on the sheet).  Kept small so labels don't overwhelm the part.
+DIM_FONT = 2.5
+LABEL_FONT = 2.5
+TABLE_FONT = 2.2
+
+
+def set_dimension_style():
+    """Shrink TechDraw's global dimension font + arrows before dims are made."""
+    try:
+        g = FreeCAD.ParamGet(
+            "User parameter:BaseApp/Preferences/Mod/TechDraw/Dimensions")
+        g.SetFloat("FontSize", DIM_FONT)
+        g.SetFloat("ArrowSize", 2.0)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Drawing assembly
 # ---------------------------------------------------------------------------
 def build_drawing(doc, shape, args):
     sheet_w, sheet_h = SHEET_SIZES[args.sheet]
+
+    # Shrink TechDraw's default dimension text/arrows (default ~5 mm is bulky).
+    set_dimension_style()
 
     page = doc.addObject("TechDraw::DrawPage", "Page")
     template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
@@ -336,13 +426,15 @@ def build_drawing(doc, shape, args):
     # TechDraw page coordinates: origin at BOTTOM-LEFT, +X right, +Y up,
     # ranging 0..sheet_w by 0..sheet_h.  view.X / view.Y is the view centre.
     # (Verified empirically against exported SVG transforms.)
-    title_h = 30.0                                   # title block band at bottom
+    # Reserve a band at the bottom for the title block so the lower row of
+    # views and the tables never sit on top of it.
+    title_h = max(45.0, sheet_h * 0.18)              # title block band at bottom
     usable_h = sheet_h - title_h
     col_w = sheet_w / 3.0
     row_h = usable_h / 2.0
     col_x = {0: sheet_w / 6.0, 1: sheet_w / 2.0, 2: 5.0 * sheet_w / 6.0}
-    top_y = title_h + usable_h * 0.72                 # upper row centre
-    bot_y = title_h + usable_h * 0.28                 # lower row centre
+    top_y = title_h + usable_h * 0.70                 # upper row centre
+    bot_y = title_h + usable_h * 0.30                 # lower row centre
 
     def cell(col, row):
         return col_x[int(col)], (top_y if row < 0.5 else bot_y)
@@ -409,7 +501,7 @@ def add_general_notes(doc, page, args, sheet_w, sheet_h):
     ann = doc.addObject("TechDraw::DrawViewAnnotation", "GeneralNotes")
     ann.Text = lines
     try:
-        ann.TextSize = 3.0
+        ann.TextSize = TABLE_FONT
     except Exception:
         pass
     page.addView(ann)
@@ -449,7 +541,7 @@ def add_annotation(doc, page, text, x, y):
     ann = doc.addObject("TechDraw::DrawViewAnnotation", safe)
     ann.Text = [text]
     try:
-        ann.TextSize = 3.5
+        ann.TextSize = LABEL_FONT
     except Exception:
         pass
     page.addView(ann)
@@ -677,7 +769,7 @@ def add_hole_table(doc, page, shape, holes, sheet_w, y):
         lines.append(f"{'H'+str(i):<4}{h['dia']:>7.1f}"
                      f"{h['x'] - bb.XMin:>8.1f}{h['y'] - bb.YMin:>8.1f}"
                      f"{depth:>8}")
-    text_size = 3.0
+    text_size = TABLE_FONT
     ann = doc.addObject("TechDraw::DrawViewAnnotation", "HoleTable")
     ann.Text = lines
     try:

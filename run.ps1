@@ -32,30 +32,36 @@ param(
 $ErrorActionPreference = "Stop"
 
 # --- locate FreeCAD -------------------------------------------------------
-$DefaultFreeCadHome = "D:\conda-envs\freecad"
-$FreeCadHome = if ($env:FREECAD_HOME) { $env:FREECAD_HOME } else { $DefaultFreeCadHome }
-
-$FreeCadExe = Join-Path $FreeCadHome "Library\bin\freecad.exe"
-if (-not (Test-Path $FreeCadExe)) {
-    # try a plain (non-conda) FreeCAD layout as a fallback
-    $alt = Join-Path $FreeCadHome "bin\freecad.exe"
-    if (Test-Path $alt) { $FreeCadExe = $alt }
-    else { throw "freecad.exe not found under '$FreeCadHome'. Set FREECAD_HOME correctly." }
+# Search order: FREECAD_HOME, standard Windows installs, then a conda env.
+$candidates = @()
+if ($env:FREECAD_HOME) {
+    $candidates += (Join-Path $env:FREECAD_HOME "bin\freecad.exe")
+    $candidates += (Join-Path $env:FREECAD_HOME "Library\bin\freecad.exe")
+}
+$candidates += "C:\Program Files\FreeCAD 1.1\bin\freecad.exe"
+$candidates += "C:\Program Files\FreeCAD 1.0\bin\freecad.exe"
+$candidates += "D:\conda-envs\freecad\Library\bin\freecad.exe"
+$FreeCadExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $FreeCadExe) {
+    throw "freecad.exe not found. Install FreeCAD or set FREECAD_HOME to its root."
 }
 $BinDir = Split-Path $FreeCadExe
 
 # --- environment ----------------------------------------------------------
-# freecad.exe's embedded Python needs the conda env root (python3xx.dll lives
-# there) AND the Library DLL folders on PATH, or it starts but silently fails
-# to run the script.  Add all of them, mirroring a working `conda activate`.
-$libRoot = Split-Path $BinDir                    # ...\Library
-$envRoot = Split-Path $libRoot                   # ...\<env>  (conda env root)
-$env:PATH = ($BinDir,
-             (Join-Path $libRoot "mingw-w64\bin"),
-             (Join-Path $libRoot "usr\bin"),
-             (Join-Path $envRoot "Scripts"),
-             $envRoot,
-             $env:PATH) -join ";"
+# Put the FreeCAD binaries on PATH.  A conda env additionally needs its Library
+# DLL folders and the env root (python3xx.dll lives there) or the GUI binary
+# starts but silently fails to run the script; a standard install is
+# self-contained in its bin folder.
+$parts = @($BinDir)
+if ($BinDir -match "Library\\bin$") {            # conda layout
+    $libRoot = Split-Path $BinDir
+    $envRoot = Split-Path $libRoot
+    $parts += (Join-Path $libRoot "mingw-w64\bin")
+    $parts += (Join-Path $libRoot "usr\bin")
+    $parts += (Join-Path $envRoot "Scripts")
+    $parts += $envRoot
+}
+$env:PATH = ($parts + $env:PATH) -join ";"
 # NOTE on headless operation: FreeCAD 1.1's PDF export needs the Gui module,
 # so it must run under freecad.exe (not freecadcmd).  Qt's "offscreen" platform
 # would avoid a visible window but DEADLOCKS this build during TechDraw export,
@@ -64,7 +70,19 @@ $env:PATH = ($BinDir,
 Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
 
 # --- resolve paths --------------------------------------------------------
-$Script = Join-Path $PSScriptRoot "step_to_drawing.py"
+# IMPORTANT: FreeCAD's script loader mishandles paths containing a backtick
+# (e.g. "D:\`AI_Models\...") and silently runs a cached/older script instead.
+# Copy the engine to a clean temp path and run that copy.  Parameters travel
+# via environment variables and the engine is self-contained, so location
+# doesn't matter.
+$ScriptSrc = Join-Path $PSScriptRoot "step_to_drawing.py"
+$runDir = Join-Path $env:TEMP "s2d_run"
+New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+Remove-Item (Join-Path $runDir "__pycache__") -Recurse -Force -ErrorAction SilentlyContinue
+# Use a UNIQUE basename: FreeCAD caches scripts by name, so a name it hasn't
+# seen guarantees the current code runs (and avoids the 'step_to_drawing' cache).
+$Script = Join-Path $runDir "s2d_engine.py"
+Copy-Item $ScriptSrc $Script -Force
 $InputFull = (Resolve-Path $StepFile).Path
 
 # Pass parameters via environment variables, NOT command-line flags: the
