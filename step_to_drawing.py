@@ -32,6 +32,7 @@ Requires FreeCAD 1.0+ with the TechDraw workbench (bundled by default).
 import sys
 import os
 import argparse
+import uuid
 from types import SimpleNamespace
 
 # ---------------------------------------------------------------------------
@@ -246,12 +247,19 @@ def template_path(sheet):
     border zone markers.  Generating our own gives a small title block, known
     editable-field keys (so every field fills), and no zone clutter.  Falls back
     to a stock template only if writing ours fails.
+
+    Each call gets a UNIQUELY named file: a fixed name would be reused by every
+    document opened in the same long-running FreeCAD session (e.g. the GUI
+    macro run more than once with "keep open" documents left around), and a
+    still-open document can hold that file locked on Windows, so a later
+    generate() overwriting it would silently fail and fall back to the stock
+    template.
     """
     W, H = SHEET_SIZES[sheet]
     try:
         tdir = os.path.join(FreeCAD.getUserAppDataDir(), "s2d_templates")
         os.makedirs(tdir, exist_ok=True)
-        path = os.path.join(tdir, f"s2d_{sheet}.svg")
+        path = os.path.join(tdir, f"s2d_{sheet}_{uuid.uuid4().hex}.svg")
         with open(path, "w", encoding="utf-8") as f:
             f.write(_template_svg(W, H))
         return path
